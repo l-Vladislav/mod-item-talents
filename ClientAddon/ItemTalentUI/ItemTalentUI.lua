@@ -505,19 +505,24 @@ local function CreateNode(row, choice)
     btn.row = row
     btn.choice = choice
 
+    -- Пропорции кнопки миникарты (LibDBIcon): иконка 17px, кольцо 53px,
+    -- центр видимого круга смещён на (15.5, 14.5) от TOPLEFT текстуры -
+    -- сам круг нарисован НЕ по центру холста MiniMap-TrackingBorder.
+    local iconSize = 24
+    local s = iconSize / 17
+
     local icon = btn:CreateTexture(nil, "ARTWORK")
-    icon:SetWidth(25)
-    icon:SetHeight(25)
+    icon:SetWidth(iconSize)
+    icon:SetHeight(iconSize)
     icon:SetPoint("CENTER")
     icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
     btn.icon = icon
 
-    -- Круглая рамка поверх квадратной иконки (стандартный приём миникарты)
     local ring = btn:CreateTexture(nil, "OVERLAY")
     ring:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
-    ring:SetWidth(66)
-    ring:SetHeight(66)
-    ring:SetPoint("TOPLEFT", btn, "TOPLEFT", -6, 6)
+    ring:SetWidth(53 * s)
+    ring:SetHeight(53 * s)
+    ring:SetPoint("TOPLEFT", btn, "CENTER", -15.5 * s, 14.5 * s)
     btn.ring = ring
 
     local glow = btn:CreateTexture(nil, "OVERLAY", nil, 1)
@@ -878,7 +883,7 @@ local charBtn = CreateFrame("Button", "ItemTalentUICharButton", CharacterFrame)
 charBtn:SetWidth(28)
 charBtn:SetHeight(28)
 -- Слева окна персонажа (справа заняты кнопки TransmogUI и других аддонов)
-charBtn:SetPoint("TOPLEFT", CharacterFrame, "TOPLEFT", 70, -41)
+charBtn:SetPoint("TOPLEFT", CharacterFrame, "TOPLEFT", 70, -35)
 charBtn:SetFrameLevel(CharacterFrame:GetFrameLevel() + 5)
 charBtn:SetNormalTexture("Interface\\Icons\\Ability_Marksmanship")
 charBtn:GetNormalTexture():SetTexCoord(0.07, 0.93, 0.07, 0.93)
