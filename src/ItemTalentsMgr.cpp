@@ -290,17 +290,22 @@ std::vector<uint8> const* ItemTalentsMgr::GetMenu(char pool, uint8 row) const
 
 int32 ItemTalentsMgr::CalcValue(TalentDef const& def, uint32 itemLevel, uint8 quality) const
 {
-    float const mult = _qualityMults[std::min<uint8>(quality, NUM_QUALITIES - 1)];
-
-    // Флэт скейлится от ilvl, затем множитель качества, ceil, минимум 1.
+    // База: флэт скейлится от ilvl (минимум 1), проценты фиксированы в base.
+    int32 base;
     if (def.perIlvl > 0.0f)
-    {
-        float const flat = std::ceil(def.base + def.perIlvl * float(itemLevel));
-        return std::max(1, int32(std::ceil(flat * mult)));
-    }
+        base = std::max(1, int32(std::ceil(def.base + def.perIlvl * float(itemLevel))));
+    else
+        base = int32(std::ceil(def.base));
 
-    // Процентные эффекты (per_ilvl == 0): фикс в base, качество тоже умножает.
-    return int32(std::ceil(def.base * mult));
+    // Каждая ступень качества даёт МИНИМУМ +1 к предыдущей (решение
+    // 2026-07-06), иначе множитель на малых базах не ощущается:
+    // значение(q) = max(значение(q-1) + 1, ceil(база * mult[q])).
+    uint8 const q = std::min<uint8>(quality, NUM_QUALITIES - 1);
+    int32 value = base;
+    for (uint8 tier = 1; tier <= q; ++tier)
+        value = std::max(value + 1, int32(std::ceil(float(base) * _qualityMults[tier])));
+
+    return value;
 }
 
 // ---------------------------------------------------------------------------
