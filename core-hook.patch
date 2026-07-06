@@ -2,26 +2,40 @@ diff --git a/src/server/game/Entities/Player/Player.cpp b/src/server/game/Entiti
 index 250a4d785..c942819b6 100644
 --- a/src/server/game/Entities/Player/Player.cpp
 +++ b/src/server/game/Entities/Player/Player.cpp
-@@ -6598,6 +6598,8 @@ void Player::_ApplyItemMods(Item* item, uint8 slot, bool apply)
- 
+@@ -4692,6 +4692,10 @@ void Player::DurabilityPointsLoss(Item* item, int32 points)
+     if (HasPreventDurabilityLossAura())
+         return;
+
++    sScriptMgr->OnPlayerDurabilityPointsLoss(this, item, points);
++    if (points <= 0)
++        return;
++
+     int32 pMaxDurability = item->GetUInt32Value(ITEM_FIELD_MAXDURABILITY);
+@@ -6598,6 +6602,8 @@ void Player::_ApplyItemMods(Item* item, uint8 slot, bool apply)
+
      ApplyEnchantment(item, apply);
- 
+
 +    sScriptMgr->OnPlayerApplyItemMods(this, item, slot, apply);
 +
      LOG_DEBUG("entities.player.items", "_ApplyItemMods complete.");
  }
- 
+
 diff --git a/src/server/game/Scripting/ScriptDefines/PlayerScript.cpp b/src/server/game/Scripting/ScriptDefines/PlayerScript.cpp
 index 50ef6a7c9..0f663a7be 100644
 --- a/src/server/game/Scripting/ScriptDefines/PlayerScript.cpp
 +++ b/src/server/game/Scripting/ScriptDefines/PlayerScript.cpp
-@@ -345,6 +345,11 @@ void ScriptMgr::OnPlayerUnequip(Player* player, Item* it)
+@@ -345,6 +345,16 @@ void ScriptMgr::OnPlayerUnequip(Player* player, Item* it)
      CALL_ENABLED_HOOKS(PlayerScript, PLAYERHOOK_ON_UNEQUIP_ITEM, script->OnPlayerUnequip(player, it));
  }
- 
+
 +void ScriptMgr::OnPlayerApplyItemMods(Player* player, Item* item, uint8 slot, bool apply)
 +{
 +    CALL_ENABLED_HOOKS(PlayerScript, PLAYERHOOK_ON_APPLY_ITEM_MODS, script->OnPlayerApplyItemMods(player, item, slot, apply));
++}
++
++void ScriptMgr::OnPlayerDurabilityPointsLoss(Player* player, Item* item, int32& points)
++{
++    CALL_ENABLED_HOOKS(PlayerScript, PLAYERHOOK_ON_DURABILITY_POINTS_LOSS, script->OnPlayerDurabilityPointsLoss(player, item, points));
 +}
 +
  void ScriptMgr::OnPlayerJoinBG(Player* player)
@@ -31,34 +45,40 @@ diff --git a/src/server/game/Scripting/ScriptDefines/PlayerScript.h b/src/server
 index f4c650355..ec6de7fb6 100644
 --- a/src/server/game/Scripting/ScriptDefines/PlayerScript.h
 +++ b/src/server/game/Scripting/ScriptDefines/PlayerScript.h
-@@ -216,6 +216,7 @@ enum PlayerHook
+@@ -216,6 +216,8 @@ enum PlayerHook
      PLAYERHOOK_ON_SEND_LIST_INVENTORY,
      PLAYERHOOK_ON_GIVE_REPUTATION,
      PLAYERHOOK_ON_GET_REPUTATION_PRICE_DISCOUNT,
 +    PLAYERHOOK_ON_APPLY_ITEM_MODS,
++    PLAYERHOOK_ON_DURABILITY_POINTS_LOSS,
      PLAYERHOOK_END
  };
- 
-@@ -412,6 +413,10 @@ public:
+
+@@ -412,6 +414,15 @@ public:
      // After an item has been unequipped
      virtual void OnPlayerUnequip(Player* /*player*/, Item* /*it*/) { }
- 
+
 +    // Called at the end of Player::_ApplyItemMods, symmetric for apply/remove
 +    // (equip, unequip, login, durability break/repair)
 +    virtual void OnPlayerApplyItemMods(Player* /*player*/, Item* /*item*/, uint8 /*slot*/, bool /*apply*/) { }
 +
++    // Called at the start of Player::DurabilityPointsLoss, before the loss is
++    // applied; set points to 0 (or negative) to skip this wear event
++    virtual void OnPlayerDurabilityPointsLoss(Player* /*player*/, Item* /*item*/, int32& /*points*/) { }
++
      // After player enters queue for BG
      virtual void OnPlayerJoinBG(Player* /*player*/) { }
- 
+
 diff --git a/src/server/game/Scripting/ScriptMgr.h b/src/server/game/Scripting/ScriptMgr.h
 index 9aa00f354..2433546ac 100644
 --- a/src/server/game/Scripting/ScriptMgr.h
 +++ b/src/server/game/Scripting/ScriptMgr.h
-@@ -375,6 +375,7 @@ public: /* PlayerScript */
+@@ -375,6 +375,8 @@ public: /* PlayerScript */
      void OnPlayerAfterMoveItemFromInventory(Player* player, Item* it, uint8 bag, uint8 slot, bool update);
      void OnPlayerEquip(Player* player, Item* it, uint8 bag, uint8 slot, bool update);
      void OnPlayerUnequip(Player* player, Item* it);
 +    void OnPlayerApplyItemMods(Player* player, Item* item, uint8 slot, bool apply);
++    void OnPlayerDurabilityPointsLoss(Player* player, Item* item, int32& points);
      void OnPlayerJoinBG(Player* player);
      void OnPlayerJoinArena(Player* player);
      void OnPlayerGetMaxPersonalArenaRatingRequirement(Player const* player, uint32 minSlot, uint32& maxArenaRating) const;
