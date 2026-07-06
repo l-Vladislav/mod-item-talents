@@ -361,10 +361,12 @@ local function SetNodeState(btn, state)
 
     if state == "chosen" then
         ring:SetVertexColor(1.0, 0.82, 0.0)
-        glow:SetAlpha(0.7)
+        glow:SetVertexColor(1.0, 0.82, 0.15)
+        glow:SetAlpha(0.6)
         glow:Show()
     elseif state == "avail" then
         ring:SetVertexColor(0.62, 0.90, 0.36)
+        glow:SetVertexColor(0.55, 0.95, 0.35)
         glow:SetAlpha(0.5)
         glow:Show()
         glow.pulse:Play()
@@ -537,11 +539,13 @@ local function CreateNode(row, choice)
     ring:SetPoint("TOPLEFT", btn, "CENTER", -15.5 * s, 14.5 * s)
     btn.ring = ring
 
-    local glow = btn:CreateTexture(nil, "OVERLAY", nil, 1)
-    glow:SetTexture("Interface\\Buttons\\UI-ActionButton-Border")
+    -- Круглое радиальное свечение ПОД узлом (UI-ActionButton-Border
+    -- квадратный и торчит углами из-под круглого кольца)
+    local glow = btn:CreateTexture(nil, "BACKGROUND")
+    glow:SetTexture("Interface\\Cooldown\\starburst")
     glow:SetBlendMode("ADD")
-    glow:SetWidth(68)
-    glow:SetHeight(68)
+    glow:SetWidth(58)
+    glow:SetHeight(58)
     glow:SetPoint("CENTER")
     glow:Hide()
     btn.glow = glow
