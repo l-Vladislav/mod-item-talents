@@ -1,0 +1,7 @@
+AC_ADD_SCRIPT("${CMAKE_CURRENT_LIST_DIR}/src/ItemTalentsMgr.cpp")
+AC_ADD_SCRIPT("${CMAKE_CURRENT_LIST_DIR}/src/ItemTalentsScripts.cpp")
+AC_ADD_SCRIPT("${CMAKE_CURRENT_LIST_DIR}/src/mod_item_talents_loader.cpp")
+
+CU_SET_PATH("CMAKE_CONFIG_OUTPUT_DIR" "${CMAKE_CURRENT_LIST_DIR}/conf")
+
+CU_ADD_HOOK(AFTER_WORLDSERVER_CMAKE "${CMAKE_CURRENT_LIST_DIR}/conf/mod_item_talents.conf.dist")
