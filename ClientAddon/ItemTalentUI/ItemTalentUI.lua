@@ -97,6 +97,11 @@ local lastInfoAt = 0
 local invChangedAt = 0
 local popupAction = nil
 
+local invCache = {}      -- [invSlot] = {kills, free, spent} для тултипов (.itemtalent list)
+local listBuild = nil    -- накапливаемый ответ list
+local listReqAt = 0      -- троттлинг запросов list
+local listAt = nil       -- время отложенного запроса list
+
 local slotButtons = {}   -- [inv] = button
 local nodes = {}         -- [row][choice] = button
 local wires = {}         -- пул текстур-сегментов пути
@@ -107,6 +112,13 @@ end
 
 local function SendCmd(cmd)
     SendChatMessage(cmd, "SAY")
+end
+
+-- Запрос состояний всей экипировки (для тултипов), не чаще раза в 5 сек
+local function RequestList()
+    if GetTime() - listReqAt < 5 then return end
+    listReqAt = GetTime()
+    SendCmd(".itemtalent list")
 end
 
 local function EffectMeta(effect)
@@ -803,6 +815,9 @@ local function ParseLine(msg)
             pending = nil
             lastInfoAt = GetTime()
             Render()
+        elseif listBuild then
+            invCache = listBuild
+            listBuild = nil
         end
         return true
     end
@@ -810,6 +825,7 @@ local function ParseLine(msg)
     if msg == "ITALENT:OK" then
         hint:SetText("Готово!")
         PlaySound("LEVELUPSOUND")
+        listAt = GetTime() + 1 -- обновить кэш тултипов
         return true
     end
 
@@ -853,7 +869,18 @@ local function ParseLine(msg)
         end
     end
 
-    -- ITEM-строки списка и прочее протокольное - просто прячем
+    -- ITEM-строки ответа list: состояния надетых предметов для тултипов
+    local iSlot, iKills, iFree, iSpent =
+        msg:match("^ITALENT:ITEM:(%d+):%d+:%a:%d+:(%d+):(%d+):(%d+):")
+    if iSlot then
+        listBuild = listBuild or {}
+        listBuild[tonumber(iSlot)] = {
+            kills = tonumber(iKills), free = tonumber(iFree), spent = tonumber(iSpent),
+        }
+        return true
+    end
+
+    -- прочее протокольное - просто прячем
     return msg:find("^ITALENT:") ~= nil
 end
 
@@ -863,6 +890,52 @@ ChatFrame_AddMessageEventFilter("CHAT_MSG_SYSTEM", function(self, event, msg)
         return true -- спрятать из чата
     end
     return false
+end)
+
+-- ---------------------------------------------------------------------------
+-- Тултипы предметов и Alt+клик
+-- ---------------------------------------------------------------------------
+
+-- Отложенные запросы list
+local updater = CreateFrame("Frame")
+updater:SetScript("OnUpdate", function()
+    if listAt and GetTime() >= listAt then
+        listAt = nil
+        RequestList()
+    end
+end)
+
+-- Строка состояния пробуждения в тултипе надетого предмета
+hooksecurefunc(GameTooltip, "SetInventoryItem", function(tip, unit, slot)
+    if unit ~= "player" then return end
+    local st = invCache[slot]
+    if not st then return end
+    if st.spent > 0 then
+        tip:AddLine(string.format("Пробуждён: %d из 5", st.spent), 1.0, 0.82, 0.0)
+        if st.free > 0 then
+            tip:AddLine("Есть свободное очко таланта!", 0.55, 0.95, 0.35)
+        end
+    elseif st.free > 0 then
+        tip:AddLine("Готов к пробуждению!", 0.55, 0.95, 0.35)
+    else
+        tip:AddLine(string.format("Пробуждение: убийств %d", st.kills), 0.6, 0.62, 0.7)
+    end
+    tip:Show()
+end)
+
+-- Alt+ЛКМ по предмету: модифицированные клики проходят через OnModifiedClick,
+-- который ловится hooksecurefunc (Ctrl занят примеркой, Shift - ссылкой/стаком)
+hooksecurefunc("PaperDollItemSlotButton_OnModifiedClick", function(self, button)
+    if button == "LeftButton" and IsAltKeyDown() then
+        if not f:IsShown() then f:Show() end
+        UpdateSlotButtons()
+        SelectSlot(self:GetID())
+    end
+end)
+hooksecurefunc("ContainerFrameItemButton_OnModifiedClick", function(self, button)
+    if button == "LeftButton" and IsAltKeyDown() then
+        Msg("Пробудить можно только надетый предмет: наденьте его и Alt+клик по слоту на персонаже.")
+    end
 end)
 
 -- ---------------------------------------------------------------------------
@@ -907,6 +980,7 @@ charBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
 local ev = CreateFrame("Frame")
 ev:RegisterEvent("PLAYER_LOGIN")
+ev:RegisterEvent("PLAYER_ENTERING_WORLD")
 ev:RegisterEvent("UNIT_INVENTORY_CHANGED")
 ev:SetScript("OnEvent", function(self, event, arg1)
     if event == "PLAYER_LOGIN" then
@@ -917,14 +991,19 @@ ev:SetScript("OnEvent", function(self, event, arg1)
                 ItemTalentUIDB.pos.x, ItemTalentUIDB.pos.y)
         end
         RenderEmpty()
-        Msg("загружен. Кнопка на окне персонажа или /itu.")
-    elseif event == "UNIT_INVENTORY_CHANGED" and arg1 == "player" and f:IsShown() then
-        UpdateSlotButtons()
-        local now = GetTime()
-        if now - invChangedAt > 1 then
-            invChangedAt = now
-            if selectedInv and GetInventoryItemLink("player", selectedInv) then
-                Refresh()
+        Msg("загружен. Кнопка на окне персонажа, /itu или Alt+клик по надетому предмету.")
+    elseif event == "PLAYER_ENTERING_WORLD" then
+        listAt = GetTime() + 8 -- прогреть кэш тултипов после входа в мир
+    elseif event == "UNIT_INVENTORY_CHANGED" and arg1 == "player" then
+        listAt = GetTime() + 2
+        if f:IsShown() then
+            UpdateSlotButtons()
+            local now = GetTime()
+            if now - invChangedAt > 1 then
+                invChangedAt = now
+                if selectedInv and GetInventoryItemLink("player", selectedInv) then
+                    Refresh()
+                end
             end
         end
     end

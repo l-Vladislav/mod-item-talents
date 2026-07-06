@@ -401,9 +401,12 @@ private:
 
             std::optional<char> pool = ItemTalentsMgr::GetPool(proto->Class, proto->SubClass);
             ItemTalents::ItemState& state = sItemTalentsMgr->EnsureState(player, item);
-            handler->PSendSysMessage("ITALENT:ITEM:{}:{}:{}:{}:{}:{}",
-                item->GetGUID().GetCounter(), *pool, proto->Quality, state.kills,
-                sItemTalentsMgr->FreePoints(state), proto->Name1);
+            // slot+1 = клиентский inv-слот; spent нужен аддону для строки
+            // "Пробуждён" в тултипе предмета
+            handler->PSendSysMessage("ITALENT:ITEM:{}:{}:{}:{}:{}:{}:{}:{}",
+                slot + 1, item->GetGUID().GetCounter(), *pool, proto->Quality,
+                state.kills, sItemTalentsMgr->FreePoints(state),
+                ItemTalentsMgr::SpentPoints(state), proto->Name1);
         }
 
         handler->PSendSysMessage("ITALENT:END");
