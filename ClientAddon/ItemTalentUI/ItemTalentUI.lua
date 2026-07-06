@@ -79,8 +79,6 @@ local ERR_TEXT = {
     NO_POINTS      = "Нет свободных очков таланта.",
     NO_MASTER      = "Нужен мастер оружия рядом (столицы).",
     NOT_CHOSEN     = "В этом ряду ничего не выбрано.",
-    PREV_ROW       = "Сначала выберите талант в предыдущем ряду.",
-    ROWS_BELOW     = "Сначала сбросьте ряды ниже - дерево заполняется сверху вниз.",
 }
 
 -- v1-ограничение сервера: ряды выше не принимают выбор (ROW_SOON).
@@ -373,11 +371,6 @@ local function SetNodeState(btn, state)
     elseif state == "open" then -- ряд открыт, но нет свободных очков
         ring:SetVertexColor(0.42, 0.55, 0.38)
         icon:SetVertexColor(0.7, 0.7, 0.7)
-    elseif state == "chain" then -- сперва нужен выбор в предыдущем ряду
-        ring:SetVertexColor(0.48, 0.42, 0.28)
-        icon:SetDesaturated(true)
-        icon:SetAlpha(0.55)
-        lock:Show()
     elseif state == "dim" then  -- в ряду уже есть другой выбор
         ring:SetVertexColor(0.32, 0.34, 0.40)
         icon:SetDesaturated(true)
@@ -420,8 +413,6 @@ local function NodeOnEnter(self)
     elseif state == "open" then
         GameTooltip:AddLine(string.format("Ряд открыт - нет свободных очков (до очка: %d убийств)",
             math.max(0, (current.nextNeed or 0) - (current.kills or 0))), 0.79, 0.66, 0.29)
-    elseif state == "chain" then
-        GameTooltip:AddLine("Закрыто: сначала выберите талант в ряду выше", 0.79, 0.66, 0.29)
     elseif state == "dim" then
         local chosenOpt = current.rows[row].opts[current.rows[row].chosen]
         GameTooltip:AddLine("В этом ряду выбрано: " .. (chosenOpt and chosenOpt.name or "?"),
@@ -466,11 +457,6 @@ local function NodeOnClick(self, button)
     if state == "open" then
         hint:SetText(string.format("Нет свободных очков - до следующего очка %d убийств.",
             math.max(0, (current.nextNeed or 0) - (current.kills or 0))))
-        return
-    end
-
-    if state == "chain" then
-        hint:SetText("Сначала выберите талант в предыдущем ряду - дерево заполняется сверху вниз.")
         return
     end
 
@@ -688,9 +674,9 @@ local function Render()
     headName:SetText(itemName)
     headName:SetTextColor(qc.r, qc.g, qc.b)
     -- разделитель '-': у клиента 3.3.5 нет глифа '·' (рисуется как '?')
-    headSub:SetText(string.format("%s - ilvl %d - Ряды: %d из 5 - Убийств: %d",
+    headSub:SetText(string.format("%s - ilvl %d - Убийств: %d",
         _G["ITEM_QUALITY" .. current.quality .. "_DESC"] or "?", current.ilvl,
-        current.rowsOpen, current.kills))
+        current.kills))
 
     xpLabel:SetText(string.format("Очки таланта: |cffffd100%d|r", current.freePts))
     if current.nextNeed > 0 then
@@ -714,7 +700,6 @@ local function Render()
             local meta = opt and EffectMeta(opt.effect) or { icon = FALLBACK_ICON }
             btn.icon:SetTexture("Interface\\Icons\\" .. meta.icon)
 
-            local prevChosen = row == 1 or current.rows[row - 1].chosen > 0
             local state
             if row > current.rowsOpen or (not opt and row >= 5) or row > current.maxRow then
                 state = "locked"
@@ -722,8 +707,6 @@ local function Render()
                 state = "chosen"
             elseif rowData.chosen > 0 then
                 state = "dim"
-            elseif not prevChosen then
-                state = "chain"
             elseif current.freePts > 0 then
                 state = "avail"
             else

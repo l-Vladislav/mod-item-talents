@@ -310,13 +310,6 @@ private:
             return true;
         }
 
-        // Ряды строго последовательны: сперва выбор в предыдущем ряду
-        if (row > 1 && !state.rows[row - 2])
-        {
-            SendError(handler, "PREV_ROW");
-            return true;
-        }
-
         if (!sItemTalentsMgr->FreePoints(state))
         {
             SendError(handler, "NO_POINTS");
@@ -371,14 +364,6 @@ private:
             SendError(handler, "NOT_CHOSEN");
             return true;
         }
-
-        // Ряды последовательны: сбрасывать можно только нижний выбранный
-        for (uint8 r = row + 1; r <= ItemTalents::MAX_ROWS; ++r)
-            if (state.rows[r - 1])
-            {
-                SendError(handler, "ROWS_BELOW");
-                return true;
-            }
 
         if (!sItemTalentsMgr->IsNearMaster(player))
         {
