@@ -553,12 +553,16 @@ local function CreateNode(row, choice)
     pulse:SetLooping("BOUNCE")
     glow.pulse = pulse
 
-    -- Замок по центру, поверх затемнённой иконки
-    local lock = btn:CreateTexture(nil, "OVERLAY", nil, 2)
+    -- Замок в нижнем правом углу, на отдельном фрейме ПОВЕРХ кольца и
+    -- свечения (sub-level у CreateTexture в 3.3.5 ненадёжен)
+    local lockFrame = CreateFrame("Frame", nil, btn)
+    lockFrame:SetAllPoints()
+    lockFrame:SetFrameLevel(btn:GetFrameLevel() + 3)
+    local lock = lockFrame:CreateTexture(nil, "OVERLAY")
     lock:SetTexture("Interface\\LFGFrame\\UI-LFG-ICON-LOCK")
-    lock:SetWidth(16)
-    lock:SetHeight(16)
-    lock:SetPoint("CENTER")
+    lock:SetWidth(14)
+    lock:SetHeight(14)
+    lock:SetPoint("BOTTOMRIGHT", 2, -2)
     lock:SetTexCoord(0, 0.71875, 0, 0.875)
     lock:Hide()
     btn.lock = lock
