@@ -1,0 +1,8 @@
+## Interface: 30300
+## Title: ItemTalentUI |cffc8a24b(Пробуждение снаряжения)|r
+## Notes: Панель талантов предмета для mod-item-talents. Ctrl+ПКМ по предмету.
+## Author: l-Vladislav
+## Version: 0.1
+## SavedVariables: ItemTalentUIDB
+
+ItemTalentUI.lua
