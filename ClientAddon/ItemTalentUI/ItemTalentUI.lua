@@ -113,7 +113,7 @@ local PROCS = {
     ["Оглушительный залп"] = { icon = "Ability_GolemStormBolt",        fmt = "-20%% скорости атаки цели с крита" },
     ["Пробивающий выстрел"]= { icon = "Ability_PierceDamage",          fmt = "-%d брони цели с крита" },
     ["Дуга силы"]          = { icon = "Spell_Arcane_StarFire",         fmt = "%d урона тайной магией со спелл-крита" },
-    ["Эхо маны"]           = { icon = "Spell_Frost_ManaRecharges",     fmt = "Возвращает %d маны с каста" },
+    ["Эхо маны"]           = { icon = "Spell_Frost_ManaRecharge",      fmt = "Возвращает %d маны с каста" },
     ["Фамильяр-фантом"]    = { icon = "Spell_Nature_SpiritWolf",       fmt = "Шанс призвать духа-фантома на 15 сек" },
     ["Гнев Джордана"]      = { icon = "Spell_Nature_ChainLightning",   fmt = "Молния на %d урона природой с каста" },
 }
