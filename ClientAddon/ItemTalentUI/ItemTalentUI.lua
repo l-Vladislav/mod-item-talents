@@ -100,7 +100,6 @@ local popupAction = nil
 local slotButtons = {}   -- [inv] = button
 local nodes = {}         -- [row][choice] = button
 local wires = {}         -- пул текстур-сегментов пути
-local rowLocked = {}     -- [row] = FontString пометки справа от ряда
 
 local function Msg(text)
     DEFAULT_CHAT_FRAME:AddMessage("|cffc8a24b[Таланты]|r " .. text, 1.0, 0.85, 0.4)
@@ -292,7 +291,6 @@ local ROW_STEP = 70
 local NODE_X = { 250, 345, 440 } -- x центров узлов
 local NODE_SIZE = 40
 local LABEL_RIGHT_X = 206        -- правый край подписей рядов
-local LOCKNOTE_X = 472           -- левый край пометок "качество"/"скоро"
 
 local function NodeCenter(row, choice)
     return NODE_X[choice], TREE_TOP - (row - 1) * ROW_STEP
@@ -541,11 +539,12 @@ local function CreateNode(row, choice)
     pulse:SetLooping("BOUNCE")
     glow.pulse = pulse
 
+    -- Замок по центру, поверх затемнённой иконки
     local lock = btn:CreateTexture(nil, "OVERLAY", nil, 2)
     lock:SetTexture("Interface\\LFGFrame\\UI-LFG-ICON-LOCK")
-    lock:SetWidth(14)
-    lock:SetHeight(14)
-    lock:SetPoint("BOTTOMRIGHT", 2, -2)
+    lock:SetWidth(16)
+    lock:SetHeight(16)
+    lock:SetPoint("CENTER")
     lock:SetTexCoord(0, 0.71875, 0, 0.875)
     lock:Hide()
     btn.lock = lock
@@ -567,12 +566,6 @@ for row = 1, 5 do
     label:SetText(meta.label)
     label:SetTextColor(meta.r, meta.g, meta.b)
 
-    local locked = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    locked:SetPoint("LEFT", f, "TOPLEFT", LOCKNOTE_X, y)
-    locked:SetTextColor(0.5, 0.52, 0.58)
-    locked:Hide()
-    rowLocked[row] = locked
-
     nodes[row] = {}
     for choice = 1, 3 do
         nodes[row][choice] = CreateNode(row, choice)
@@ -581,7 +574,6 @@ end
 
 local function SetTreeShown(shown)
     for row = 1, 5 do
-        if not shown then rowLocked[row]:Hide() end
         for choice = 1, 3 do
             if shown then
                 nodes[row][choice]:Show()
@@ -693,8 +685,6 @@ local function Render()
     SetTreeShown(true)
     for row = 1, 5 do
         local rowData = current.rows[row]
-        local lockedLabel = rowLocked[row]
-        lockedLabel:Hide()
 
         for choice = 1, 3 do
             local btn = nodes[row][choice]
@@ -715,14 +705,6 @@ local function Render()
                 state = "open"
             end
             SetNodeState(btn, state)
-        end
-
-        if row > current.rowsOpen then
-            lockedLabel:SetText("качество")
-            lockedLabel:Show()
-        elseif row > current.maxRow and rowData.chosen == 0 then
-            lockedLabel:SetText("скоро")
-            lockedLabel:Show()
         end
     end
 
@@ -883,7 +865,7 @@ local charBtn = CreateFrame("Button", "ItemTalentUICharButton", CharacterFrame)
 charBtn:SetWidth(28)
 charBtn:SetHeight(28)
 -- Слева окна персонажа (справа заняты кнопки TransmogUI и других аддонов)
-charBtn:SetPoint("TOPLEFT", CharacterFrame, "TOPLEFT", 70, -35)
+charBtn:SetPoint("TOPLEFT", CharacterFrame, "TOPLEFT", 75, -41)
 charBtn:SetFrameLevel(CharacterFrame:GetFrameLevel() + 5)
 charBtn:SetNormalTexture("Interface\\Icons\\Ability_Marksmanship")
 charBtn:GetNormalTexture():SetTexCoord(0.07, 0.93, 0.07, 0.93)
