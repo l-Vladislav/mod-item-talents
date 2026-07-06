@@ -41,7 +41,7 @@ local SLOT_LIST = {
 local EFFECTS = {
     STAT_STA           = { icon = "Spell_Holy_WordFortitude",        fmt = "+%d к выносливости" },
     STAT_STR           = { icon = "Spell_Nature_Strength",           fmt = "+%d к силе" },
-    STAT_AGI           = { icon = "Ability_Hunter_AspectOfTheMonkey", fmt = "+%d к ловкости" },
+    STAT_AGI           = { icon = "Ability_Hunter_AspectoftheMonkey", fmt = "+%d к ловкости" },
     STAT_INT           = { icon = "Spell_Holy_ArcaneIntellect",      fmt = "+%d к интеллекту" },
     STAT_SPI           = { icon = "Spell_Shadow_Burningspirit",      fmt = "+%d к духу" },
     ATTACK_POWER       = { icon = "Ability_Warrior_BattleShout",     fmt = "+%d к силе атаки (ближней и дальней)" },
