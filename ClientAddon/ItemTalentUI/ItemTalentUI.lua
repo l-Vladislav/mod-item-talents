@@ -170,12 +170,17 @@ local function UpdateSlotButtons()
     for _, def in ipairs(SLOT_LIST) do
         local btn = slotButtons[def.inv]
         local tex = GetInventoryItemTexture("player", def.inv)
-        btn:SetNormalTexture(tex or btn.emptyTex)
-        btn:GetNormalTexture():SetTexCoord(0.07, 0.93, 0.07, 0.93)
-        if tex then
-            btn:GetNormalTexture():SetVertexColor(1, 1, 1)
-        else
-            btn:GetNormalTexture():SetVertexColor(0.35, 0.35, 0.35)
+        -- Иконка ставится ТОЛЬКО через SetItemButtonTexture: SetNormalTexture
+        -- у ItemButtonTemplate - это 64px регион подложки, иконка в нём
+        -- рисуется гигантской (проверено 2026-07-06)
+        SetItemButtonTexture(btn, tex or btn.emptyTex)
+        local icon = _G[btn:GetName() .. "IconTexture"]
+        if icon then
+            if tex then
+                icon:SetVertexColor(1, 1, 1)
+            else
+                icon:SetVertexColor(0.4, 0.4, 0.4)
+            end
         end
         if selectedInv == def.inv then
             btn.sel:Show()
@@ -663,7 +668,8 @@ local function Render()
     local qc = ITEM_QUALITY_COLORS[current.quality] or ITEM_QUALITY_COLORS[1]
     headName:SetText(itemName)
     headName:SetTextColor(qc.r, qc.g, qc.b)
-    headSub:SetText(string.format("%s · ilvl %d · Ряды: %d из 5 · Убийств: %d",
+    -- разделитель '-': у клиента 3.3.5 нет глифа '·' (рисуется как '?')
+    headSub:SetText(string.format("%s - ilvl %d - Ряды: %d из 5 - Убийств: %d",
         _G["ITEM_QUALITY" .. current.quality .. "_DESC"] or "?", current.ilvl,
         current.rowsOpen, current.kills))
 
@@ -724,7 +730,7 @@ local function Render()
         end
     end
     if #parts > 0 then
-        summary:SetText("|cffffd100Итог:|r " .. table.concat(parts, " · "))
+        summary:SetText("|cffffd100Итог:|r " .. table.concat(parts, " - "))
     else
         summary:SetText("|cffffd100Итог:|r таланты не выбраны")
     end
@@ -871,8 +877,8 @@ end)
 local charBtn = CreateFrame("Button", "ItemTalentUICharButton", CharacterFrame)
 charBtn:SetWidth(28)
 charBtn:SetHeight(28)
--- Кнопка TransmogUI стоит на (-75, -41); наша - следующей в том же ряду
-charBtn:SetPoint("TOPRIGHT", CharacterFrame, "TOPRIGHT", -105, -41)
+-- Слева окна персонажа (справа заняты кнопки TransmogUI и других аддонов)
+charBtn:SetPoint("TOPLEFT", CharacterFrame, "TOPLEFT", 70, -41)
 charBtn:SetFrameLevel(CharacterFrame:GetFrameLevel() + 5)
 charBtn:SetNormalTexture("Interface\\Icons\\Ability_Marksmanship")
 charBtn:GetNormalTexture():SetTexCoord(0.07, 0.93, 0.07, 0.93)
