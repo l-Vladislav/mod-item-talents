@@ -35,6 +35,7 @@
 #include "Item.h"
 #include "ItemTemplate.h"
 #include "Log.h"
+#include "ObjectMgr.h"
 #include "Player.h"
 #include "Random.h"
 #include "SharedDefines.h"
@@ -77,6 +78,13 @@ namespace
         return static_cast<bool>(CharacterDatabase.Query(
             "SELECT 1 FROM information_schema.tables "
             "WHERE table_schema = DATABASE() AND table_name = '{}' LIMIT 1", name));
+    }
+
+    bool WorldColumnExists(char const* table, char const* column)
+    {
+        return static_cast<bool>(WorldDatabase.Query(
+            "SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() "
+            "AND table_name = '{}' AND column_name = '{}' LIMIT 1", table, column));
     }
 }
 
@@ -209,6 +217,10 @@ void ItemTalentsMgr::LoadConfig()
         sConfigMgr->GetOption<uint32>("ItemTalents.SoundCooldown", 30) * IN_MILLISECONDS;
     _soundOnKillChance = sConfigMgr->GetOption<uint32>("ItemTalents.SoundOnKillChance", 5);
 
+    // Существо Фамильяра-фантома (прок SUMMON, пул H). Дефолт 191090 -
+    // спиритовый фамильяр гачи (семья spirit, creature_template 191090-191099).
+    _phantomCreature = sConfigMgr->GetOption<uint32>("ItemTalents.PhantomCreature", 191090);
+
     LOG_INFO("module", "mod-item-talents: enable={} maxRow={} masters={} range={:.1f} "
         "ignoreBots={} sounds={}", _enable, _maxImplementedRow, _masterEntries.size(),
         _masterRange, _ignoreBots, _itemSounds.size());
@@ -249,8 +261,20 @@ void ItemTalentsMgr::LoadDefinitions()
         return;
     }
 
-    QueryResult result = WorldDatabase.Query(
-        "SELECT pool, `row`, choice, name_ru, desc_ru, effect, base, per_ilvl FROM item_talent_def");
+    // Колонка subclass добавляется миграцией фазы 2
+    // (mod_item_talents_subclass.sql); без неё грузим по-старому (всё -1),
+    // подкласс-специфичный ряд 5 недоступен.
+    bool const hasSubclass = WorldColumnExists("item_talent_def", "subclass");
+    if (!hasSubclass)
+        LOG_WARN("module", "mod-item-talents: item_talent_def.subclass is missing - "
+            "row 5 (subclass menus) inert. Apply "
+            "pending_db_world/mod_item_talents_subclass.sql and restart.");
+
+    QueryResult result = WorldDatabase.Query(hasSubclass
+        ? "SELECT pool, `row`, choice, name_ru, desc_ru, effect, base, per_ilvl, subclass "
+          "FROM item_talent_def"
+        : "SELECT pool, `row`, choice, name_ru, desc_ru, effect, base, per_ilvl "
+          "FROM item_talent_def");
     if (!result)
     {
         LOG_WARN("module", "mod-item-talents: item_talent_def is empty; module disabled.");
@@ -265,11 +289,12 @@ void ItemTalentsMgr::LoadDefinitions()
         std::string const pool = fields[0].Get<std::string>();
         int8 const row = fields[1].Get<int8>();
         int8 const choice = fields[2].Get<int8>();
+        int16 const subclass = hasSubclass ? fields[8].Get<int16>() : int16(-1);
         if (pool.empty() || row < 1 || row > int8(MAX_ROWS) || choice < 1
-            || choice > int8(MAX_MENU_CHOICES))
+            || choice > int8(MAX_MENU_CHOICES) || subclass < -1 || subclass > 20)
         {
             LOG_WARN("module", "mod-item-talents: skipped bad item_talent_def row "
-                "(pool '{}', row {}, choice {}).", pool, row, choice);
+                "(pool '{}', row {}, choice {}, subclass {}).", pool, row, choice, subclass);
             continue;
         }
 
@@ -279,8 +304,8 @@ void ItemTalentsMgr::LoadDefinitions()
         def.effect = fields[5].Get<std::string>();
         def.base = fields[6].Get<float>();
         def.perIlvl = fields[7].Get<float>();
-        _defs[MakeKey(pool[0], uint8(row), uint8(choice))] = std::move(def);
-        _menus[MakeKey(pool[0], uint8(row), 0)].push_back(uint8(choice));
+        _defs[MakeKey(pool[0], uint8(row), uint8(choice), subclass)] = std::move(def);
+        _menus[MakeKey(pool[0], uint8(row), 0, subclass)].push_back(uint8(choice));
         ++count;
     } while (result->NextRow());
 
@@ -333,6 +358,20 @@ void ItemTalentsMgr::LoadDefinitions()
             "perks (rows 3) will be inert. Apply "
             "pending_db_world/mod_item_talents_aura_spells.sql and restart.",
             ItemTalents::SPELL_MOVE_SPEED_R1);
+
+    // Ряд 5: параметры проков (item_talent_procs) + сброс кэша базовых эпиков
+    _baseEpicCache.clear();
+    _gaTableStatus = 0;
+    LoadProcs();
+
+    // Спеллы ряда 5 (триггеры + видимые) - тоже spell_dbc, нужен рестарт
+    // после mod_item_talents_proc_spells.sql
+    if (_procsLoaded && (!sSpellMgr->GetSpellInfo(ItemTalents::TRIGGER_SPELL_FIRST)
+        || !sSpellMgr->GetSpellInfo(ItemTalents::VISIBLE_SPELL_FIRST)))
+        LOG_WARN("module", "mod-item-talents: row-5 proc spells ({}/{}) not found in "
+            "spell_dbc - awakening procs will be inert. Apply "
+            "pending_db_world/mod_item_talents_proc_spells.sql and restart.",
+            ItemTalents::TRIGGER_SPELL_FIRST, ItemTalents::VISIBLE_SPELL_FIRST);
 }
 
 bool ItemTalentsMgr::ShouldIgnorePlayer(Player* player) const
@@ -411,9 +450,18 @@ bool ItemTalentsMgr::IsEligibleItem(ItemTemplate const* proto)
     return GetPool(proto->Class, proto->SubClass).has_value();
 }
 
-TalentDef const* ItemTalentsMgr::GetDef(char pool, uint8 row, uint8 choice) const
+TalentDef const* ItemTalentsMgr::GetDef(char pool, uint8 row, uint8 choice,
+    int16 subclass) const
 {
-    auto itr = _defs.find(MakeKey(pool, row, choice));
+    // Точный подкласс -> фолбэк на -1 (любой)
+    if (subclass >= 0)
+    {
+        auto exact = _defs.find(MakeKey(pool, row, choice, subclass));
+        if (exact != _defs.end())
+            return &exact->second;
+    }
+
+    auto itr = _defs.find(MakeKey(pool, row, choice, -1));
     return itr != _defs.end() ? &itr->second : nullptr;
 }
 
@@ -430,15 +478,65 @@ ItemTalents::NamedDef const* ItemTalentsMgr::GetNamedDef(uint32 itemEntry, uint8
     return namedDef.def.effect.empty() ? nullptr : &namedDef;
 }
 
+bool ItemTalentsMgr::IsBaseEpic(ItemTemplate const* proto) const
+{
+    if (!proto || proto->Quality != ITEM_QUALITY_EPIC)
+        return false;
+
+    auto cached = _baseEpicCache.find(proto->ItemId);
+    if (cached != _baseEpicCache.end())
+        return cached->second;
+
+    // Без GA-таблицы (модуль mod-gear-ascension отсутствует) цепочек нет:
+    // любой эпик - базовый. Известная грабля: SELECT из несуществующей
+    // таблицы абортит worldserver - гейт через information_schema.
+    if (!_gaTableStatus)
+    {
+        _gaTableStatus = WorldTableExists("item_upgrade_chain") ? 1 : -1;
+        if (_gaTableStatus < 0)
+            LOG_INFO("module", "mod-item-talents: item_upgrade_chain is missing "
+                "(mod-gear-ascension not installed?) - all epics count as base epics.");
+    }
+
+    bool baseEpic = true;
+    if (_gaTableStatus > 0)
+    {
+        // Идём по prev_entry до корня цепочки (кап на глубину - защита от
+        // случайного цикла в данных); entry вне цепочки - сам себе корень.
+        uint32 current = proto->ItemId;
+        for (uint8 hops = 0; hops < 16; ++hops)
+        {
+            QueryResult result = WorldDatabase.Query(
+                "SELECT prev_entry FROM item_upgrade_chain WHERE entry = {}", current);
+            if (!result)
+                break; // не в цепочке: current - корень
+
+            uint32 const prev = result->Fetch()[0].Get<uint32>();
+            if (!prev || prev == current)
+                break; // корень цепочки
+            current = prev;
+        }
+
+        if (current != proto->ItemId)
+        {
+            ItemTemplate const* root = sObjectMgr->GetItemTemplate(current);
+            baseEpic = root && root->Quality >= ITEM_QUALITY_EPIC;
+        }
+    }
+
+    _baseEpicCache[proto->ItemId] = baseEpic;
+    return baseEpic;
+}
+
 uint8 ItemTalentsMgr::RowsOpenForItem(ItemTemplate const* proto) const
 {
     if (!proto)
         return 0;
 
     uint8 const rows = RowsOpenForQuality(proto->Quality);
-    // v1-ТЕСТОВОЕ послабление (см. заголовок): именной набор открывает
-    // ряд 5 уже на эпике; финальное правило фазы 2 - легендарка.
-    if (rows >= 4 && rows < MAX_ROWS && HasNamedSet(proto->ItemId))
+    // Фаза 2 (решение 2026-07-06): ряд 5 открывается УЖЕ НА ЭПИКЕ у именных
+    // наборов и у базовых эпиков; GA-копии с корнем ниже эпика - потолок 4.
+    if (rows == 4 && (HasNamedSet(proto->ItemId) || IsBaseEpic(proto)))
         return MAX_ROWS;
 
     return rows;
@@ -449,8 +547,12 @@ bool ItemTalentsMgr::IsRowSelectable(ItemTemplate const* proto, uint8 row) const
     if (row <= _maxImplementedRow)
         return true;
 
-    // Ряд 5 реализован ТОЛЬКО для именных наборов (обычные проки - фаза 2)
-    return row == MAX_ROWS && proto && HasNamedSet(proto->ItemId);
+    if (row != MAX_ROWS || !proto)
+        return false;
+
+    // Именной ряд 5 работает и без item_talent_procs (пассивы Джордана);
+    // generic-проки требуют загруженных параметров.
+    return HasNamedSet(proto->ItemId) || (_procsLoaded && IsBaseEpic(proto));
 }
 
 TalentDef const* ItemTalentsMgr::GetDefForItem(ItemTemplate const* proto, uint8 row,
@@ -464,17 +566,31 @@ TalentDef const* ItemTalentsMgr::GetDefForItem(ItemTemplate const* proto, uint8 
             return &namedDef->def;
 
     std::optional<char> pool = GetPool(proto->Class, proto->SubClass);
-    return pool ? GetDef(*pool, row, choice) : nullptr;
+    return pool ? GetDef(*pool, row, choice, int16(proto->SubClass)) : nullptr;
 }
 
-std::vector<uint8> const* ItemTalentsMgr::GetMenu(char pool, uint8 row) const
+std::vector<uint8> const* ItemTalentsMgr::GetMenu(char pool, uint8 row, int16 subclass) const
 {
-    auto itr = _menus.find(MakeKey(pool, row, 0));
+    if (subclass >= 0)
+    {
+        auto exact = _menus.find(MakeKey(pool, row, 0, subclass));
+        if (exact != _menus.end())
+            return &exact->second;
+    }
+
+    auto itr = _menus.find(MakeKey(pool, row, 0, -1));
     return itr != _menus.end() ? &itr->second : nullptr;
 }
 
 int32 ItemTalentsMgr::CalcValue(TalentDef const& def, uint32 itemLevel, uint8 quality) const
 {
+    // Проки ряда 5: base хранит spell id триггера, значение считается ТОЛЬКО
+    // от per_ilvl; роллы качества на проки не распространяются (PERKS
+    // "Роллы и качество"). coef 0 = у эффекта фиксированные basepoints в dbc.
+    if (def.effect == "PROC")
+        return def.perIlvl > 0.0f
+            ? std::max(1, int32(std::ceil(def.perIlvl * float(itemLevel)))) : 0;
+
     // База: флэт скейлится от ilvl (минимум 1), проценты фиксированы в base.
     int32 base;
     if (def.perIlvl > 0.0f)
@@ -681,7 +797,7 @@ void ItemTalentsMgr::EnsureRolled(Player* player, Item* item)
             continue;
         }
 
-        std::vector<uint8> const* menu = GetMenu(*pool, row);
+        std::vector<uint8> const* menu = GetMenu(*pool, row, int16(proto->SubClass));
         if (!menu || menu->empty())
             continue;
 
@@ -707,7 +823,9 @@ void ItemTalentsMgr::EnsureRolled(Player* player, Item* item)
             else if (next < options.size())
             {
                 roll.choice = options[next++];
-                roll.quality = RollQuality();
+                // Ряд 5 - проки БЕЗ качества (PERKS "Роллы и качество":
+                // роллы качеств на проки не распространяются)
+                roll.quality = row == MAX_ROWS ? 0 : RollQuality();
             }
             else
                 continue; // вариантов в меню меньше, чем слотов
@@ -934,9 +1052,14 @@ void ItemTalentsMgr::ApplyTalent(Player* player, Item* item, uint8 row, uint8 sl
     if (row == MAX_ROWS)
         if (ItemTalents::NamedDef const* namedDef = GetNamedDef(proto->ItemId, roll.choice))
         {
-            ApplyEffect(player, item, namedDef->def.effect,
-                CalcValue(namedDef->def, proto->ItemLevel, roll.quality), apply,
-                namedDef->procChance, namedDef->icdSecs);
+            // Именной прок общего движка (Гнев Джордана): base = триггер-спелл
+            if (namedDef->def.effect == "PROC")
+                ApplyProc(player, item, uint32(namedDef->def.base),
+                    CalcValue(namedDef->def, proto->ItemLevel, roll.quality), apply);
+            else
+                ApplyEffect(player, item, namedDef->def.effect,
+                    CalcValue(namedDef->def, proto->ItemLevel, roll.quality), apply,
+                    namedDef->procChance, namedDef->icdSecs);
             return;
         }
 
@@ -944,9 +1067,17 @@ void ItemTalentsMgr::ApplyTalent(Player* player, Item* item, uint8 row, uint8 sl
     if (!pool)
         return;
 
-    TalentDef const* def = GetDef(*pool, row, roll.choice);
+    TalentDef const* def = GetDef(*pool, row, roll.choice, int16(proto->SubClass));
     if (!def)
         return;
+
+    // Проки ряда 5 (effect='PROC'): регистрация в движке, не статы
+    if (def->effect == "PROC")
+    {
+        ApplyProc(player, item, uint32(def->base),
+            CalcValue(*def, proto->ItemLevel, roll.quality), apply);
+        return;
+    }
 
     ApplyEffect(player, item, def->effect, CalcValue(*def, proto->ItemLevel, roll.quality),
         apply);
@@ -1166,11 +1297,16 @@ bool ItemTalentsMgr::RollProc(ItemTalents::ActiveProc& proc)
     return true;
 }
 
-// JORDAN_COIN: убийство -> шанс отчеканить владельцу value меди
+// Убийство: проки ряда 5 (KILL) + именной JORDAN_COIN. Жертва -
+// OnPlayerCreatureKill (существо), PvE-гейт выполнен вызывающим.
 void ItemTalentsMgr::OnKillProcs(Player* player)
 {
     if (!IsEnabled() || !player)
         return;
+
+    // Ряд 5: KILL-проки (Гальваника, Пир победителя, Скользящая тень,
+    // Хладнокровие) - эффекты на себя, цель не нужна
+    HandleProcEvent(player, ItemTalents::ProcTrigger::KILL, nullptr);
 
     PlayerPerks* perks = GetPerks(player->GetGUID().GetCounter());
     if (!perks || perks->coinProcs.empty())
@@ -1190,17 +1326,25 @@ void ItemTalentsMgr::OnKillProcs(Player* player)
     }
 }
 
-// JORDAN_LIGHTNING: успешный боевой каст -> шанс поразить цель молнией.
-// Визуал: NPC-спелл 9532 "Lightning Bolt" (природа), урон переопределяется
-// basepoints, каст полностью triggered (мгновенно, без ГКД/маны).
+// Успешный боевой каст по врагу: проки ряда 5 (CAST_HARMFUL - Всплеск чар,
+// Эхо маны, Фамильяр-фантом, Гнев Джордана) + легаси JORDAN_LIGHTNING
+// (NPC-спелл 9532 с bp-override; остаётся до применения миграции фазы 2).
 void ItemTalentsMgr::OnCombatSpellCast(Player* player, Unit* target, uint32 spellId)
 {
     if (!IsEnabled() || !player || !target)
         return;
 
-    // Не реагируем на собственную прок-молнию (рекурсия Spell::cast)
-    if (spellId == ItemTalents::SPELL_GENERIC_LIGHTNING_BOLT)
+    // Не реагируем на собственные прок-спеллы (рекурсия Spell::cast)
+    if (spellId == ItemTalents::SPELL_GENERIC_LIGHTNING_BOLT
+        || (spellId >= ItemTalents::TRIGGER_SPELL_FIRST
+            && spellId <= ItemTalents::VISIBLE_SPELL_LAST))
         return;
+
+    // Только PvE (решение 2026-07-06): цель - существо не под игроком
+    if (!IsPveUnit(target))
+        return;
+
+    HandleProcEvent(player, ItemTalents::ProcTrigger::CAST_HARMFUL, target);
 
     PlayerPerks* perks = GetPerks(player->GetGUID().GetCounter());
     if (!perks || perks->lightningProcs.empty())

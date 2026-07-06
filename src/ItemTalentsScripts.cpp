@@ -4,7 +4,10 @@
  *
  * Протокол аддона (ADDON_UI.md §4), ответы SYSTEM-сообщениями с префиксом ITALENT:
  *   .itemtalent info <bag> <slot> | info inv <slot>
- *       ITALENT:HDR:<guid>:<ilvl>:<quality>:<pool>:<rowsOpen>:<nearMaster>:<kills>:<freePts>:<nextNeed>
+ *       ITALENT:HDR:<guid>:<ilvl>:<quality>:<pool>:<rowsOpen>:<nearMaster>:<kills>:<freePts>:<nextNeed>:<baseEpic>
+ *         baseEpic (10-е поле, фаза 2): 1 = ряд 5 доступен предмету (базовый
+ *         эпик - Quality 4 и корень GA-цепочки не ниже эпика; именные
+ *         предметы тоже 1), 0 = потолок 4 ряда ("недоступен для предмета")
  *       ITALENT:ROW:<row>:<chosen slot 0..3>
  *       ITALENT:OPT:<row>:<slot 1..3>:<effect>:<value>:<perkQuality 0..2>:<name_ru>
  *       ITALENT:END
@@ -16,6 +19,8 @@
  *
  * GM-команды (SEC_GAMEMASTER, тестирование):
  *   .itemtalent awaken <itemGuidLow>      - все очки + выбрать слот 1 в пустых рядах
+ *     (фаза 2: пробуждает и ряд 5 - у именных наборов И generic базовых
+ *     эпиков; закрытые качеством/гейтом ряды отсекает TryChoose)
  *   .itemtalent setkills <itemGuidLow> <n> - выставить kills (кэш + БД)
  *   .itemtalent reroll <itemGuidLow>      - сброс выборов и роллов, свежий ролл
  *   .itemtalent sound <soundId>           - проиграть себе звук (подбор SoundEntries)
@@ -137,15 +142,21 @@ namespace
         return desc;
     }
 
-    // Описание перка для госсипа: именной ряд 5 подставляет и {chance}
+    // Описание перка для госсипа: ряд 5 подставляет и {chance} - у generic-
+    // проков из item_talent_procs (base дефа = триггер-спелл), у именных
+    // перков из item_talent_named.proc_chance
     std::string PerkDesc(ItemTemplate const* proto, uint8 row,
         ItemTalents::TalentDef const* def, uint8 choice, int32 value)
     {
         int32 chance = -1;
         if (row == ItemTalents::MAX_ROWS)
-            if (ItemTalents::NamedDef const* namedDef =
+        {
+            if (def->effect == "PROC")
+                chance = sItemTalentsMgr->GetProcChance(uint32(def->base));
+            else if (ItemTalents::NamedDef const* namedDef =
                 sItemTalentsMgr->GetNamedDef(proto->ItemId, choice))
                 chance = int32(namedDef->procChance);
+        }
 
         return FormatDesc(def->descRu, value, chance);
     }
@@ -176,6 +187,8 @@ public:
     void OnUpdate(uint32 diff) override
     {
         sItemTalentsMgr->UpdateNemesisCache(diff);
+        // Болты активных Фамильяров-фантомов (прок ряда 5, пул H)
+        sItemTalentsMgr->UpdatePhantoms(diff);
     }
 };
 
@@ -295,7 +308,14 @@ public:
 
 // ---------------------------------------------------------------------------
 // UnitScript: бонус урона по немезидам (NEMESIS_DMG_PCT) + пересчёт
-// "Уз фамильяра" при изменении владельческих аур (FAMILIAR_ALL_STATS).
+// "Уз фамильяра" при изменении владельческих аур (FAMILIAR_ALL_STATS) +
+// события проков ряда 5 (фаза 2):
+//  - ModifyMeleeDamage: замах игрока (MELEE_HIT/крит-аппроксимация, Танец
+//    клинка) и входящий замах (TAKEN_HIT физ., DODGE/PARRY/BLOCK/TAKEN_CRIT);
+//  - ModifySpellDamageTaken: спелл-урон игрока (мили-абилки/выстрелы/
+//    заклинания по DmgClass) и полученный спелл-урон (TAKEN_HIT по школе);
+//  - OnDamage (Unit::DealDamage, после митигации): канал "получен урон"
+//    (Мановая пелена), LOW_HP, BIG_HIT.
 // Включаем только нужные хуки - UnitScript-хуки очень горячие.
 // ---------------------------------------------------------------------------
 class ItemTalents_Unit : public UnitScript
@@ -306,6 +326,7 @@ public:
             UNITHOOK_MODIFY_MELEE_DAMAGE,
             UNITHOOK_MODIFY_SPELL_DAMAGE_TAKEN,
             UNITHOOK_MODIFY_PERIODIC_DAMAGE_AURAS_TICK,
+            UNITHOOK_ON_DAMAGE,
             UNITHOOK_ON_AURA_APPLY,
             UNITHOOK_ON_AURA_REMOVE,
         }) { }
@@ -313,10 +334,18 @@ public:
     void ModifyMeleeDamage(Unit* target, Unit* attacker, uint32& damage) override
     {
         AddNemesisBonus(target, attacker, damage);
+
+        // Проки ряда 5. ВНИМАНИЕ: хук зовётся ДО броска исхода замаха
+        // (Unit::CalculateMeleeDamage) - модель аппроксимаций описана в
+        // ItemTalentsProcs.cpp.
+        if (attacker && attacker->IsPlayer())
+            sItemTalentsMgr->OnProcMeleeDone(attacker->ToPlayer(), target, damage);
+        else if (target && target->IsPlayer())
+            sItemTalentsMgr->OnProcMeleeTaken(target->ToPlayer(), attacker);
     }
 
     void ModifySpellDamageTaken(Unit* target, Unit* attacker, int32& damage,
-        SpellInfo const* /*spellInfo*/) override
+        SpellInfo const* spellInfo) override
     {
         if (damage <= 0)
             return;
@@ -324,6 +353,20 @@ public:
         uint32 udamage = uint32(damage);
         AddNemesisBonus(target, attacker, udamage);
         damage = int32(udamage);
+
+        // Проки ряда 5 (урон уже посчитан, значение не меняем)
+        if (attacker && attacker->IsPlayer())
+            sItemTalentsMgr->OnProcSpellDone(attacker->ToPlayer(), target, spellInfo);
+        else if (target && target->IsPlayer())
+            sItemTalentsMgr->OnProcSpellTaken(target->ToPlayer(), attacker, spellInfo);
+    }
+
+    // Любой фактический урон (после митигации, до списания здоровья):
+    // TAKEN_HIT "любой урон" + LOW_HP + BIG_HIT
+    void OnDamage(Unit* attacker, Unit* victim, uint32& damage) override
+    {
+        if (victim && victim->IsPlayer())
+            sItemTalentsMgr->OnProcAnyDamageTaken(victim->ToPlayer(), attacker, damage);
     }
 
     void ModifyPeriodicDamageAurasTick(Unit* target, Unit* attacker, uint32& damage,
@@ -597,9 +640,9 @@ private:
                 "Нет свободных очков: нужно больше убийств с этим предметом.",
                 ITEM_TALENTS_GOSSIP_SENDER, MakeAction(OP_ITEM, equipSlot));
 
-        // Именной ряд 5 роллится без качества - "Обычный" в подписи не пишем
-        bool const named = row == ItemTalents::MAX_ROWS
-            && sItemTalentsMgr->HasNamedSet(proto->ItemId);
+        // Ряд 5 (именной И generic-проки) роллится без качества - "Обычный"
+        // в подписи не пишем
+        bool const named = row == ItemTalents::MAX_ROWS;
         for (uint8 slot = 1; slot <= ItemTalents::MAX_SLOTS; ++slot)
         {
             ItemTalents::RollSlot const& roll = state.rolls[row - 1][slot - 1];
@@ -730,11 +773,15 @@ private:
 
         uint8 const rowsOpen = sItemTalentsMgr->RowsOpenForItem(proto);
         uint8 const nearMaster = sItemTalentsMgr->IsNearMaster(player) ? 1 : 0;
+        // 10-е поле baseEpic: ряд 5 доступен предмету (базовый эпик или
+        // именной набор - у именных тоже 1); см. шапку файла
+        uint8 const baseEpic = (sItemTalentsMgr->IsBaseEpic(proto)
+            || sItemTalentsMgr->HasNamedSet(proto->ItemId)) ? 1 : 0;
 
-        handler->PSendSysMessage("ITALENT:HDR:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+        handler->PSendSysMessage("ITALENT:HDR:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
             item->GetGUID().GetCounter(), proto->ItemLevel, proto->Quality, *pool, rowsOpen,
             nearMaster, state.kills, sItemTalentsMgr->FreePoints(state),
-            sItemTalentsMgr->NextPointNeed(state.kills));
+            sItemTalentsMgr->NextPointNeed(state.kills), baseEpic);
 
         for (uint8 row = 1; row <= ItemTalents::MAX_ROWS; ++row)
         {

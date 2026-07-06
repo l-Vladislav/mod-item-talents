@@ -65,8 +65,58 @@ local EFFECTS = {
     NEMESIS_DMG_PCT    = { icon = "INV_Misc_Bone_HumanSkull_01",     fmt = "+%d%% урона по немезидам" },
     FAMILIAR_ALL_STATS = { icon = "Ability_Hunter_BeastCall",        fmt = "Пока фамильяр призван: +%d ко всем характеристикам" },
     GOLD_XP_PCT        = { icon = "INV_Misc_Coin_02",                fmt = "+%d%% золота с существ, +1%% опыта" },
+    JORDAN_COIN        = { icon = "INV_Misc_Coin_17",                fmt = "Убийства с шансом чеканят владельцу %d меди" },
+    MANA_FLAT          = { icon = "Spell_Holy_MagicalSentry",        fmt = "+%d к максимуму маны" },
 }
 local FALLBACK_ICON = "INV_Misc_QuestionMark"
+
+-- Проки ряда 5 (effect='PROC'): иконки и тексты по имени перка
+-- (источник: CUSTOM_SPELLS.md, иконки утверждены 2026-07-06)
+local PROCS = {
+    ["Мановая пелена"]     = { icon = "Spell_Shadow_DetectLesserInvisibility", fmt = "Поглощает %d урона при ударе по вам" },
+    ["Всплеск чар"]        = { icon = "Spell_Nature_WispSplode",       fmt = "+%d к силе заклинаний на 10 сек с каста" },
+    ["Последний оплот"]    = { icon = "Spell_Holy_PowerWordShield",    fmt = "Щит %d при здоровье ниже 35%%" },
+    ["Рывок тени"]         = { icon = "Ability_Rogue_Sprint",          fmt = "+30%% скорости бега при крите по вам" },
+    ["Змеиная реакция"]    = { icon = "Ability_Hunter_SerpentSwiftness", fmt = "+%d ловкости при уклонении" },
+    ["Контрудар"]          = { icon = "Spell_Nature_NatureTouchDecay", fmt = "%d урона природой при уклонении" },
+    ["Разряд"]             = { icon = "Spell_Nature_Lightning",        fmt = "%d урона природой атакующему" },
+    ["Заземление"]         = { icon = "Spell_Nature_GroundingTotem",   fmt = "+%d к сопротивлениям при маг. уроне" },
+    ["Гальваника"]         = { icon = "Spell_Nature_LightningShield",  fmt = "+%d к рейтингу скорости за убийство" },
+    ["Шипы стали"]         = { icon = "Spell_Nature_Thorns",           fmt = "%d физ. урона атакующему" },
+    ["Второе дыхание"]     = { icon = "Ability_Hunter_Harass",         fmt = "Исцеляет %d при здоровье ниже 30%%" },
+    ["Несгибаемость"]      = { icon = "Ability_Warrior_ShieldWall",    fmt = "+%d брони после тяжелого удара" },
+    ["Отражение"]          = { icon = "Ability_Warrior_ShieldReflection", fmt = "%d физ. урона атакующему при блоке" },
+    ["Стена героя"]        = { icon = "Ability_Warrior_ShieldMastery", fmt = "+%d к блокированию при блоке" },
+    ["Живая сталь"]        = { icon = "Spell_Holy_HolyBolt",           fmt = "Исцеляет %d при блоке" },
+    ["Ответный выпад"]     = { icon = "INV_Sword_27",                  fmt = "Шанс дополнительного удара" },
+    ["Танец клинка"]       = { icon = "Ability_Whirlwind",             fmt = "После парирования след. удар +%d урона" },
+    ["Дуэлянт"]            = { icon = "Ability_Warrior_Riposte",       fmt = "+%d к криту и парированию на 8 сек" },
+    ["Кровавая жатва"]     = { icon = "Ability_Warrior_BloodFrenzy",   fmt = "+%d к силе атаки с крита" },
+    ["Зазубренная кромка"] = { icon = "Ability_Rogue_Rupture",         fmt = "Кровотечение %d за 6 сек с крита" },
+    ["Пир победителя"]     = { icon = "Ability_Warrior_Devastate",     fmt = "Исцеляет %d за убийство" },
+    ["Оглушающий удар"]    = { icon = "Spell_Frost_Stun",              fmt = "Шанс оглушить цель на 2 сек" },
+    ["Дробящий удар"]      = { icon = "Ability_Smash",                 fmt = "-%d брони цели на 8 сек" },
+    ["Землетрясение"]      = { icon = "Spell_Nature_Earthquake",       fmt = "%d урона врагам в 5 м с крита" },
+    ["Размах"]             = { icon = "Ability_Warrior_Cleave",        fmt = "Удар задевает до 2 доп. целей (%d)" },
+    ["Подсечка"]           = { icon = "Ability_ShockWave",             fmt = "Шанс замедлить цель на 50%%" },
+    ["Насаженный"]         = { icon = "INV_Spear_06",                  fmt = "Кровотечение %d за 6 сек с крита" },
+    ["Теневой укол"]       = { icon = "Spell_Shadow_ShadowBolt",       fmt = "%d урона тьмой с удара" },
+    ["Отравленная кромка"] = { icon = "Ability_Poisons",               fmt = "Яд %d за 6 сек с крита" },
+    ["Скользящая тень"]    = { icon = "Ability_Vanish",                fmt = "+%d к рейтингу скорости за убийство" },
+    ["Град ударов"]        = { icon = "Ability_GhoulFrenzy",           fmt = "Шанс 2 дополнительных ударов" },
+    ["Глухая защита"]      = { icon = "Spell_Magic_LesserInvisibilty", fmt = "+%d к уклонению при ударе по вам" },
+    ["Прямой в челюсть"]   = { icon = "Ability_Kick",                  fmt = "Шанс прервать заклинание цели" },
+    ["Меткий выстрел"]     = { icon = "INV_Spear_07",                  fmt = "Доп. выстрел на %d урона" },
+    ["Пригвождение"]       = { icon = "Ability_Rogue_Trip",            fmt = "Шанс замедлить цель на 50%%" },
+    ["Хладнокровие"]       = { icon = "Spell_Frost_WizardMark",        fmt = "+%d к криту за убийство" },
+    ["Картечь"]            = { icon = "Ability_UpgradeMoonGlaive",     fmt = "%d урона цели и 2 врагам рядом" },
+    ["Оглушительный залп"] = { icon = "Ability_GolemStormBolt",        fmt = "-20%% скорости атаки цели с крита" },
+    ["Пробивающий выстрел"]= { icon = "Ability_PierceDamage",          fmt = "-%d брони цели с крита" },
+    ["Дуга силы"]          = { icon = "Spell_Arcane_StarFire",         fmt = "%d урона тайной магией со спелл-крита" },
+    ["Эхо маны"]           = { icon = "Spell_Frost_ManaRecharges",     fmt = "Возвращает %d маны с каста" },
+    ["Фамильяр-фантом"]    = { icon = "Spell_Nature_SpiritWolf",       fmt = "Шанс призвать духа-фантома на 15 сек" },
+    ["Гнев Джордана"]      = { icon = "Spell_Nature_ChainLightning",   fmt = "Молния на %d урона природой с каста" },
+}
 
 local ERR_TEXT = {
     DISABLED       = "Система талантов отключена на сервере.",
@@ -125,12 +175,19 @@ local function RequestList()
     SendCmd(".itemtalent list")
 end
 
-local function EffectMeta(effect)
+local function EffectMeta(effect, name)
+    if effect == "PROC" and name and PROCS[name] then
+        return PROCS[name]
+    end
     return EFFECTS[effect] or { icon = FALLBACK_ICON, fmt = "%d" }
 end
 
-local function EffectDesc(effect, value)
-    return string.format(EffectMeta(effect).fmt, value)
+local function EffectDesc(effect, value, name)
+    local fmt = EffectMeta(effect, name).fmt
+    if fmt:find("%%d") then
+        return string.format(fmt, value)
+    end
+    return fmt
 end
 
 -- ---------------------------------------------------------------------------
@@ -424,7 +481,7 @@ local function NodeOnEnter(self)
     end
 
     GameTooltip:SetText(opt.name, 1.0, 0.82, 0.0)
-    GameTooltip:AddLine(EffectDesc(opt.effect, opt.value), 1, 1, 1, 1)
+    GameTooltip:AddLine(EffectDesc(opt.effect, opt.value, opt.name), 1, 1, 1, 1)
     if opt.quality == 1 then
         GameTooltip:AddLine("Качество перка: отличное (+25%)", 0.12, 1.0, 0.0)
     elseif opt.quality == 2 then
@@ -450,7 +507,9 @@ local function NodeOnEnter(self)
         GameTooltip:AddLine("В этом ряду выбрано: " .. (chosenOpt and chosenOpt.name or "?"),
             0.65, 0.66, 0.72)
     else
-        if row > current.rowsOpen then
+        if row == 5 and current.baseEpic == 0 then
+            GameTooltip:AddLine("Недоступен: предмет не эпический по происхождению", 0.8, 0.25, 0.25)
+        elseif row > current.rowsOpen then
             GameTooltip:AddLine("Закрыто: не хватает качества предмета", 0.8, 0.25, 0.25)
         elseif row > current.maxRow then
             GameTooltip:AddLine("Откроется в следующем обновлении", 0.8, 0.66, 0.29)
@@ -476,7 +535,9 @@ local function NodeOnClick(self, button)
     local opt = rowData.opts[choice]
 
     if state == "locked" then
-        if row > current.rowsOpen then
+        if row == 5 and current.baseEpic == 0 then
+            hint:SetText("Пробуждение доступно только предметам, эпическим по происхождению.")
+        elseif row > current.rowsOpen then
             hint:SetText("Ряд закрыт: прокачайте качество предмета (Gear Ascension).")
         elseif row > current.maxRow then
             hint:SetText("Этот ряд откроется в следующем обновлении.")
@@ -522,7 +583,7 @@ local function NodeOnClick(self, button)
         local guid, r, c = current.guid, row, choice
         AskConfirm(string.format("Выбрать |cffffd100%s|r?\n%s\n\nБудет потрачено 1 очко таланта."
             .. "\nСбросить можно бесплатно у мастера оружия.",
-            opt.name, EffectDesc(opt.effect, opt.value)), function()
+            opt.name, EffectDesc(opt.effect, opt.value, opt.name)), function()
             SendCmd(string.format(".itemtalent choose %d %d %d", guid, r, c))
         end)
     end
@@ -729,7 +790,7 @@ local function Render()
         for choice = 1, 3 do
             local btn = nodes[row][choice]
             local opt = rowData.opts[choice]
-            local meta = opt and EffectMeta(opt.effect) or { icon = FALLBACK_ICON }
+            local meta = opt and EffectMeta(opt.effect, opt.name) or { icon = FALLBACK_ICON }
             btn.icon:SetTexture("Interface\\Icons\\" .. meta.icon)
 
             local state
@@ -753,7 +814,7 @@ local function Render()
         local rowData = current.rows[row]
         if rowData.chosen > 0 and rowData.opts[rowData.chosen] then
             local opt = rowData.opts[rowData.chosen]
-            tinsert(parts, EffectDesc(opt.effect, opt.value))
+            tinsert(parts, EffectDesc(opt.effect, opt.value, opt.name))
         end
     end
     if #parts > 0 then
@@ -859,13 +920,20 @@ local function ParseLine(msg)
         return true
     end
 
-    local guid, ilvl, quality, pool, rowsOpen, nearMaster, kills, freePts, nextNeed =
-        msg:match("^ITALENT:HDR:(%d+):(%d+):(%d+):(%a):(%d+):(%d+):(%d+):(%d+):(%d+)$")
+    -- HDR: 10-е поле baseEpic добавлено фазой 2; старый 9-полевой формат
+    -- тоже принимаем (переходный период), baseEpic тогда = 1
+    local guid, ilvl, quality, pool, rowsOpen, nearMaster, kills, freePts, nextNeed, baseEpic =
+        msg:match("^ITALENT:HDR:(%d+):(%d+):(%d+):(%a):(%d+):(%d+):(%d+):(%d+):(%d+):(%d+)$")
+    if not guid then
+        guid, ilvl, quality, pool, rowsOpen, nearMaster, kills, freePts, nextNeed =
+            msg:match("^ITALENT:HDR:(%d+):(%d+):(%d+):(%a):(%d+):(%d+):(%d+):(%d+):(%d+)$")
+    end
     if guid then
         pending = {
             guid = tonumber(guid), ilvl = tonumber(ilvl), quality = tonumber(quality),
             pool = pool, rowsOpen = tonumber(rowsOpen), nearMaster = tonumber(nearMaster),
             kills = tonumber(kills), freePts = tonumber(freePts), nextNeed = tonumber(nextNeed),
+            baseEpic = baseEpic and tonumber(baseEpic) or 1,
             rows = {},
         }
         for row = 1, 5 do pending.rows[row] = { chosen = 0, opts = {} } end

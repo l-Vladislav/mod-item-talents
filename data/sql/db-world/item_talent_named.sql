@@ -5,7 +5,11 @@
 -- ВСЕ 3 БЕЗ качества (quality всегда 0); v1-ТЕСТОВОЕ послабление - ряд 5
 -- открыт уже на эпике (финальное правило фазы 2 - легендарка).
 -- proc_chance = 0 -> пассив; {N}/{chance} подставляет модуль.
--- JORDAN_LIGHTNING визуал - NPC-спелл 9532 "Lightning Bolt" (см. модуль).
+-- ФАЗА 2 (2026-07-06): "Гнев Джордана" переведен на общий движок проков
+-- ряда 5 - effect='PROC', base = триггер-спелл 108042, видимый спелл 108092
+-- (параметры прока: item_talent_procs, миграция mod_item_talents_subclass.sql;
+-- шанс 15% / ICD 8с там же; поля proc_chance/icd_secs строки - справочные).
+-- Легаси-визуал 9532 остается в модуле только для БД без миграции фазы 2.
 -- Идемпотентно: CREATE TABLE IF NOT EXISTS + DELETE + INSERT.
 
 CREATE TABLE IF NOT EXISTS `item_talent_named` (
@@ -25,6 +29,6 @@ DELETE FROM `item_talent_named` WHERE `item_entry` = 873;
 
 INSERT INTO `item_talent_named`
   (`item_entry`,`choice`,`name_ru`,`desc_ru`,`effect`,`base`,`per_ilvl`,`proc_chance`,`icd_secs`) VALUES
-(873,1,'Гнев Джордана','Заклинания даруют шанс {chance}% поразить цель молнией ({N} урона природой)','JORDAN_LIGHTNING',0,1.2,15,8),
+(873,1,'Гнев Джордана','Заклинания с шансом {chance}% поражают цель молнией: {N} урона','PROC',108042,1.2,15,8),
 (873,2,'Цена Джордана','Убийства с шансом {chance}% чеканят владельцу {N} меди','JORDAN_COIN',0,5.0,20,20),
 (873,3,'Щедрость Джордана','+{N} к максимуму маны','MANA_FLAT',0,3.0,0,0);

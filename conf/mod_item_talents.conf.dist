@@ -73,3 +73,15 @@ ItemTalents.SoundCooldown = 30
 
 # Шанс (в процентах) проиграть звук пробуждённого оружия при убийстве.
 ItemTalents.SoundOnKillChance = 5
+
+#
+#    Ряд 5 "Пробуждение" (фаза 2): проки базовых эпиков.
+#    Определения - item_talent_def (effect='PROC') + item_talent_procs,
+#    спеллы 108000-108092 - spell_dbc (миграции mod_item_talents_subclass.sql
+#    и mod_item_talents_proc_spells.sql, после применения нужен рестарт
+#    worldserver).
+#
+
+# Существо Фамильяра-фантома (прок пула H "Фамильяр-фантом"): entry из
+# creature_template. Дефолт 191090 - спиритовый фамильяр гачи (семья spirit).
+ItemTalents.PhantomCreature = 191090

@@ -14,7 +14,16 @@
  * пропуск износа, бонус урона по немезидам, бонус статов при фамильяре,
  * золото/опыт - агрегируются по игроку в PlayerPerks (см. ниже).
  *
- * Дизайн: .claude/item-talents/DESIGN.md (особенно §2, §4, §6) и PERKS.md.
+ * Ряд 5 "Пробуждение" (фаза 2): только БАЗОВЫЕ эпики (IsBaseEpic - корень
+ * GA-цепочки item_upgrade_chain имеет Quality 4) и именные предметы.
+ * Каждый перк ряда 5 - прок: сид item_talent_def с effect='PROC',
+ * base = id скрытого триггер-спелла (108000+), per_ilvl = коэффициент;
+ * параметры прока - world-таблица item_talent_procs. Срабатывания
+ * обрабатываются В МОДУЛЕ через хуки (не через ядровую прок-систему),
+ * движок - ItemTalentsProcs.cpp.
+ *
+ * Дизайн: .claude/item-talents/DESIGN.md (особенно §2, §4, §6) и PERKS.md;
+ * спеллы ряда 5 - .claude/item-talents/CUSTOM_SPELLS.md.
  */
 
 #ifndef MOD_ITEM_TALENTS_MGR_H
@@ -32,6 +41,7 @@
 class Creature;
 class Item;
 class Player;
+class SpellInfo;
 class Unit;
 struct ItemTemplate;
 
@@ -50,11 +60,103 @@ namespace ItemTalents
     constexpr uint32 SPELL_HEAL_TAKEN_R1 = 108905; // 108905-108909, аура 118 MOD_HEALING_PCT
     constexpr uint32 SPELL_PHYS_TAKEN_R1 = 108910; // 108910-108914, аура 87 MOD_DAMAGE_PERCENT_TAKEN (физ.)
 
-    // Визуал прока JORDAN_LIGHTNING: классический NPC-спелл "Lightning Bolt"
-    // (природа, SPELL_EFFECT_SCHOOL_DAMAGE; в живой БД его кастуют Riverpaw
-    // Mystic / Murloc Minor Oracle через SAI). Урон переопределяется
-    // basepoints, каст triggered - визуал и звук молнии бесплатно.
+    // Визуал прока JORDAN_LIGHTNING (легаси-путь до применения миграции
+    // фазы 2) и болтов Фамильяра-фантома: классический NPC-спелл
+    // "Lightning Bolt" (природа, SPELL_EFFECT_SCHOOL_DAMAGE). Урон
+    // переопределяется basepoints, каст triggered - визуал бесплатно.
     constexpr uint32 SPELL_GENERIC_LIGHTNING_BOLT = 9532;
+
+    // Ряд 5 "Пробуждение" (фаза 2, CUSTOM_SPELLS.md): скрытые триггер-пассивы
+    // (маркеры на игроке) и видимые спеллы эффектов (spell_dbc, миграция
+    // pending_db_world/mod_item_talents_proc_spells.sql).
+    constexpr uint32 TRIGGER_SPELL_FIRST = 108000; // 108000-108042 заняты
+    constexpr uint32 TRIGGER_SPELL_LAST  = 108044; // 108043-108044 - резерв
+    constexpr uint32 VISIBLE_SPELL_FIRST = 108050;
+    constexpr uint32 VISIBLE_SPELL_LAST  = 108092;
+    constexpr uint32 SPELL_BLADE_DANCE   = 108066; // Танец клинка (NEXT_HIT_BONUS)
+
+    // Триггеры проков ряда 5 (item_talent_procs.trigger_type).
+    // ВАЖНО: у ядра нет хуков с исходом удара (крит/уклонение/парирование/
+    // блок), а ядровую прок-систему модуль сознательно не использует.
+    // *_CRIT/DODGE/PARRY/BLOCK реализованы СТАТИСТИЧЕСКОЙ аппроксимацией:
+    // прок роллится на каждое событие-носитель (удар/входящий замах) с
+    // шансом chance% * шанс_исхода (реальный крит/додж/парри/блок игрока
+    // на момент события). Частота срабатываний совпадает с честной
+    // прок-моделью, но момент не синхронизирован с фактическим исходом
+    // в комбат-логе. TODO: заменить на точную детекцию, когда появится
+    // ядровый хук с MeleeHitOutcome/crit-флагом.
+    enum class ProcTrigger : uint8
+    {
+        MELEE_HIT,    // удар/автоатака игрока (авто-замах или melee-абилка)
+        MELEE_CRIT,   // аппроксимация: MELEE_HIT x шанс мили-крита
+        ANY_CRIT,     // аппроксимация: любой урон x соотв. шанс крита
+        KILL,         // OnPlayerCreatureKill (isHonorOrXPTarget)
+        DODGE,        // аппроксимация: входящий замах x шанс уклонения
+        PARRY,        // аппроксимация: входящий замах x шанс парирования
+        BLOCK,        // аппроксимация: входящий замах x шанс блока
+        TAKEN_HIT,    // получен урон; school: 0 = любой (OnDamage),
+                      // 1 = мили-замах, 126 = магия (маска школ)
+        TAKEN_CRIT,   // аппроксимация: входящий замах x шанс крита атакующего
+        CAST_HARMFUL, // боевой каст по врагу (OnPlayerSpellCast)
+        LOW_HP,       // здоровье после удара ниже hp_threshold%
+        BIG_HIT,      // один удар снял >= hp_threshold% макс. здоровья
+        RANGED_HIT,   // выстрел игрока (spell с DmgClass RANGED)
+        RANGED_CRIT,  // аппроксимация: RANGED_HIT x шанс рендж-крита
+        SPELL_CRIT,   // аппроксимация: урон заклинанием x шанс спелл-крита
+    };
+
+    // Эффекты проков ряда 5 (item_talent_procs.effect_type)
+    enum class ProcEffect : uint8
+    {
+        DAMAGE,         // урон цели (visible_spell = SCHOOL_DAMAGE)
+        DOT,            // периодический урон (bp = значение / число тиков)
+        HEAL,           // хил себе
+        BUFF_SELF,      // бафф на себя (bp-override при coef > 0)
+        DEBUFF_TARGET,  // дебафф цели (значение передаётся ОТРИЦАТЕЛЬНЫМ)
+        ABSORB,         // щит-поглощение на себя
+        EXTRA_ATTACK,   // доп. удары (SPELL_EFFECT_ADD_EXTRA_ATTACKS, bp из dbc)
+        INTERRUPT,      // прерывание каста цели
+        STUN,           // оглушение цели (Mechanic stun - боссы иммунны)
+        AOE_DAMAGE,     // урон всем врагам в 5 м от игрока (до 8 целей)
+        CLEAVE,         // урон цели и до 2 врагам рядом с ней
+        ENERGIZE,       // восстановление маны себе
+        SUMMON,         // Фамильяр-фантом (TempSummon, best effort)
+        NEXT_HIT_BONUS, // следующий удар +N урона (Танец клинка)
+    };
+
+    // Строка item_talent_procs (acore_world): параметры прока ряда 5
+    struct ProcDef
+    {
+        uint32 visibleSpell = 0;  // 108050+ (CUSTOM_SPELLS.md)
+        ProcTrigger trigger = ProcTrigger::MELEE_HIT;
+        ProcEffect effect = ProcEffect::DAMAGE;
+        uint8 school = 0;         // фильтр школы ТРИГГЕРА (только TAKEN_HIT)
+        uint8 chance = 0;         // %
+        uint32 icdSecs = 0;
+        float coef = 0.0f;        // значение = ceil(coef * ilvl); 0 = bp из dbc
+        uint32 durationSecs = 0;  // справочно (длительность зашита в dbc)
+        uint8 hpThreshold = 0;    // LOW_HP / BIG_HIT
+    };
+
+    // Активный прок ряда 5 (предмет надет)
+    struct Row5Proc
+    {
+        ObjectGuid::LowType itemGuid = 0;
+        uint32 itemEntry = 0;
+        uint32 triggerSpell = 0; // ключ в item_talent_procs
+        int32 value = 0;         // ceil(coef * ilvl), без множителей качества
+    };
+
+    // Активный Фамильяр-фантом (эффект SUMMON)
+    struct Phantom
+    {
+        ObjectGuid owner;
+        ObjectGuid creature;
+        ObjectGuid target;
+        int32 value = 0;         // урон болта
+        int32 remainingMs = 0;
+        int32 tickMs = 0;        // до следующего болта
+    };
 
     // Строка item_talent_def (acore_world)
     struct TalentDef
@@ -118,7 +220,15 @@ namespace ItemTalents
         uint32 lastSoundMs = 0;    // троттлинг PlayItemSound (getMSTime)
         std::unordered_map<ObjectGuid::LowType, uint8> duraSavePct; // itemGuid -> % пропуска износа
         std::vector<ActiveProc> coinProcs;      // JORDAN_COIN (убийства)
-        std::vector<ActiveProc> lightningProcs; // JORDAN_LIGHTNING (боевые касты)
+        std::vector<ActiveProc> lightningProcs; // JORDAN_LIGHTNING (легаси, боевые касты)
+
+        // ---- ряд 5 "Пробуждение" ----
+        std::vector<Row5Proc> row5Procs;        // активные проки надетых предметов
+        std::unordered_map<uint32, uint32> procIcd; // triggerSpell -> lastMs; общий
+                                                    // ICD на игрока (дубликат перка
+                                                    // с двух предметов делит кулдаун)
+        int32 nextHitBonus = 0;    // Танец клинка: бонус следующего удара
+        uint32 lastMeleeDoneMs = 0; // дедуп двух вызовов ModifyMeleeDamage за замах
     };
 }
 
@@ -145,10 +255,17 @@ public:
     // пул есть, качество подходит, не рубашка (InvType 4) и не накидка (19)
     static bool IsEligibleItem(ItemTemplate const* proto);
 
-    [[nodiscard]] ItemTalents::TalentDef const* GetDef(char pool, uint8 row, uint8 choice) const;
-    // все choice-id меню (pool, row); nullptr = у ряда нет вариантов в сиде
-    [[nodiscard]] std::vector<uint8> const* GetMenu(char pool, uint8 row) const;
-    // значение с учётом качества ролла: базовая формула * QualityMults[quality]
+    // Лукап дефа/меню: точное совпадение подкласса предмета, затем фолбэк на
+    // subclass = -1 (ряды 1-4 и ряд 5 брони сидятся с -1; ряд 5 оружия -
+    // подкласс-специфичный, DESIGN "Ряд 5" / PERKS "Ряд 5 Пробуждение")
+    [[nodiscard]] ItemTalents::TalentDef const* GetDef(char pool, uint8 row, uint8 choice,
+        int16 subclass = -1) const;
+    // все choice-id меню (pool, row, subclass); nullptr = у ряда нет вариантов
+    [[nodiscard]] std::vector<uint8> const* GetMenu(char pool, uint8 row,
+        int16 subclass = -1) const;
+    // значение с учётом качества ролла: базовая формула * QualityMults[quality].
+    // effect='PROC': значение = max(1, ceil(per_ilvl * ilvl)), качество
+    // НЕ применяется (решение PERKS "Роллы и качество"), base = spell id.
     [[nodiscard]] int32 CalcValue(ItemTalents::TalentDef const& def, uint32 itemLevel,
         uint8 quality) const;
 
@@ -158,11 +275,19 @@ public:
         return _named.contains(itemEntry);
     }
     [[nodiscard]] ItemTalents::NamedDef const* GetNamedDef(uint32 itemEntry, uint8 choice) const;
-    // Ряды, открытые предмету: качество + именной бонус. v1-ТЕСТОВОЕ
-    // послабление: именной набор открывает ряд 5 уже на ЭПИКЕ (финальное
-    // правило фазы 2 - легендарка, см. PERKS.md "Именное пробуждение").
+    // Гейт ряда 5 (фаза 2, PERKS "Ряд 5"): БАЗОВЫЙ эпик = Quality 4 И предмет
+    // не является GA-копией с корнем ниже эпика. Если entry есть в цепочке
+    // item_upgrade_chain (mod-gear-ascension) - идём по prev_entry до корня,
+    // корень Quality 4 -> базовый эпик; вне цепочки Quality 4 -> базовый эпик.
+    // Кэш по entry; наличие GA-таблицы гейтится через information_schema
+    // (модуль GA может отсутствовать - тогда все эпики базовые).
+    [[nodiscard]] bool IsBaseEpic(ItemTemplate const* proto) const;
+    // Ряды, открытые предмету: качество + ряд 5 у именных наборов и БАЗОВЫХ
+    // эпиков уже на эпике (решение 2026-07-06, PERKS "Ряд 5"). Не-базовые
+    // эпики - потолок 4 ряда.
     [[nodiscard]] uint8 RowsOpenForItem(ItemTemplate const* proto) const;
-    // Ряд можно выбирать: row <= MaxImplementedRow ИЛИ именной ряд 5
+    // Ряд можно выбирать: row <= MaxImplementedRow ИЛИ ряд 5 именного набора /
+    // базового эпика (проки требуют загруженного item_talent_procs)
     [[nodiscard]] bool IsRowSelectable(ItemTemplate const* proto, uint8 row) const;
     // Универсальный лукап определения: именной ряд 5 -> item_talent_named,
     // иначе item_talent_def (pool, row, choice)
@@ -237,11 +362,33 @@ public:
     // GOLD_XP_PCT: суммарные бонусы с капами (0 = перк не выбран/бот)
     [[nodiscard]] uint32 GetGoldBonusPct(Player* player) const;
     [[nodiscard]] uint32 GetXpBonusPct(Player* player) const;
-    // Именные проки: JORDAN_COIN (из OnPlayerCreatureKill) и
-    // JORDAN_LIGHTNING (из OnPlayerSpellCast, цель-враг); оба - шанс
-    // proc_chance% + per-player ICD; срабатывание зовёт PlayItemSound
+    // Проки убийств (ряд 5 KILL + именной JORDAN_COIN, из
+    // OnPlayerCreatureKill) и боевых кастов (ряд 5 CAST_HARMFUL + легаси
+    // JORDAN_LIGHTNING, из OnPlayerSpellCast); шанс + per-player ICD;
+    // срабатывание зовёт PlayItemSound
     void OnKillProcs(Player* player);
     void OnCombatSpellCast(Player* player, Unit* target, uint32 spellId);
+
+    // ---- ряд 5 "Пробуждение": движок проков (ItemTalentsProcs.cpp) ----
+    // Параметры проков из item_talent_procs (вызывается из LoadDefinitions)
+    void LoadProcs();
+    [[nodiscard]] bool ProcsLoaded() const { return _procsLoaded; }
+    [[nodiscard]] ItemTalents::ProcDef const* GetProcDef(uint32 triggerSpell) const;
+    // шанс прока для {chance} в desc_ru; -1 = не прок / параметров нет
+    [[nodiscard]] int32 GetProcChance(uint32 triggerSpell) const;
+    // Регистрация выбранного прока (effect='PROC'): запись в PlayerPerks +
+    // скрытая аура-МАРКЕР triggerSpell на игроке (spell_dbc 108000+,
+    // пассив/скрыта/NO_AURA_CANCEL); сами срабатывания - хуки ниже
+    void ApplyProc(Player* player, Item* item, uint32 triggerSpell, int32 value, bool apply);
+    // Диспетчеры событий (PvE-only: вторая сторона - существо не под
+    // контролем игрока). Модель аппроксимаций - см. ProcTrigger.
+    void OnProcMeleeDone(Player* player, Unit* victim, uint32& damage); // + Танец клинка
+    void OnProcMeleeTaken(Player* player, Unit* attacker);
+    void OnProcSpellDone(Player* player, Unit* victim, SpellInfo const* spellInfo);
+    void OnProcSpellTaken(Player* player, Unit* attacker, SpellInfo const* spellInfo);
+    void OnProcAnyDamageTaken(Player* player, Unit* attacker, uint32 damage);
+    // Тики Фамильяра-фантома (из WorldScript::OnUpdate)
+    void UpdatePhantoms(uint32 diff);
     // NEMESIS_DMG_PCT: суммарный бонус с капом; IsNemesisTarget - лучший
     // доступный признак немезиды (кэш spawnId из character_nemesis, см. cpp)
     [[nodiscard]] uint32 GetNemesisBonusPct(Player* player) const;
@@ -269,10 +416,12 @@ public:
 private:
     ItemTalentsMgr() = default;
 
-    // choice 0 зарезервирован под ключ меню (pool, row) в _menus
-    static uint32 MakeKey(char pool, uint8 row, uint8 choice)
+    // choice 0 зарезервирован под ключ меню (pool, row, subclass) в _menus;
+    // subclass -1 (любой) кодируется как 0, конкретный подкласс - subclass+1
+    static uint32 MakeKey(char pool, uint8 row, uint8 choice, int16 subclass = -1)
     {
-        return (uint32(uint8(pool)) << 16) | (uint32(row) << 8) | choice;
+        return (uint32(uint8(pool)) << 24) | (uint32(uint8(subclass + 1)) << 16)
+            | (uint32(row) << 8) | choice;
     }
 
     // procChance/icdSecs - только для прок-эффектов именных перков
@@ -281,6 +430,25 @@ private:
     [[nodiscard]] uint8 RollQuality() const; // 0..2 по весам ItemTalents.QualityWeights
     // Общий раннер прок-списка: ICD + шанс -> true (обновляет lastMs)
     static bool RollProc(ItemTalents::ActiveProc& proc);
+
+    // ---- ряд 5: внутренности движка (ItemTalentsProcs.cpp) ----
+    // Вторая сторона события - валидная PvE-цель (существо не под игроком)
+    static bool IsPveUnit(Unit* unit);
+    // Общий диспетчер: перебор row5Procs игрока по типу триггера; chanceMult -
+    // множитель аппроксимации (шанс крита/доджа/...); schoolMask - канал
+    // TAKEN_HIT (0 = "любой урон", иначе маска школ события); eventDamage -
+    // фактический урон события (LOW_HP / BIG_HIT)
+    void HandleProcEvent(Player* player, ItemTalents::ProcTrigger trigger, Unit* target,
+        float chanceMult = 1.0f, uint32 schoolMask = 0, uint32 eventDamage = 0);
+    // ICD (общий на игрока по триггер-спеллу) + шанс -> true
+    bool RollRow5Proc(ItemTalents::PlayerPerks& perks, uint32 triggerSpell,
+        ItemTalents::ProcDef const& def, float chanceMult);
+    // Исполнение эффекта: CastCustomSpell видимого спелла (bp-override при
+    // coef > 0) / TempSummon фантома / прочее; в конце PlayItemSound
+    void ExecuteProc(Player* player, Unit* target, ItemTalents::Row5Proc const& proc,
+        ItemTalents::ProcDef const& def);
+    void SummonPhantom(Player* player, Unit* target, ItemTalents::Row5Proc const& proc,
+        ItemTalents::ProcDef const& def);
 
     // ---- агрегат перков ----
     ItemTalents::PlayerPerks* GetPerks(ObjectGuid::LowType ownerGuid);
@@ -331,9 +499,21 @@ private:
     uint32 _soundOnKillChance = 5;
 
     std::unordered_map<uint32, ItemTalents::TalentDef> _defs; // MakeKey -> def
-    std::unordered_map<uint32, std::vector<uint8>> _menus;    // MakeKey(pool,row,0) -> choice-id
+    std::unordered_map<uint32, std::vector<uint8>> _menus;    // MakeKey(pool,row,0,sub) -> choice-id
     // item entry -> именные перки ряда 5 (индекс = choice - 1)
     std::unordered_map<uint32, std::array<ItemTalents::NamedDef, ItemTalents::MAX_SLOTS>> _named;
+
+    // ---- ряд 5 "Пробуждение" ----
+    bool _procsLoaded = false;
+    uint32 _phantomCreature = 191090; // ItemTalents.PhantomCreature (дух-фамильяр)
+    std::unordered_map<uint32, ItemTalents::ProcDef> _procs; // triggerSpell -> параметры
+    std::vector<ItemTalents::Phantom> _phantoms;             // активные фантомы
+    bool _inProc = false; // ре-энтри гард: наш каст не порождает новые проки
+    // Кэш гейта базовых эпиков: entry -> bool; статус GA-таблицы
+    // item_upgrade_chain (0 = не проверяли, 1 = есть, -1 = нет). mutable -
+    // IsBaseEpic зовётся из const-методов (IsFullyAwakened и пр.)
+    mutable std::unordered_map<uint32, bool> _baseEpicCache;
+    mutable int8 _gaTableStatus = 0;
 
     using OwnerStates = std::unordered_map<ObjectGuid::LowType, ItemTalents::ItemState>;
     // ownerGuidLow -> itemGuidLow -> state; наличие ключа владельца = "кэш загружен"

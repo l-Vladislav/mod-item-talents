@@ -1,4 +1,5 @@
 AC_ADD_SCRIPT("${CMAKE_CURRENT_LIST_DIR}/src/ItemTalentsMgr.cpp")
+AC_ADD_SCRIPT("${CMAKE_CURRENT_LIST_DIR}/src/ItemTalentsProcs.cpp")
 AC_ADD_SCRIPT("${CMAKE_CURRENT_LIST_DIR}/src/ItemTalentsScripts.cpp")
 AC_ADD_SCRIPT("${CMAKE_CURRENT_LIST_DIR}/src/mod_item_talents_loader.cpp")
 
