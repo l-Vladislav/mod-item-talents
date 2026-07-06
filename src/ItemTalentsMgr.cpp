@@ -297,10 +297,16 @@ int32 ItemTalentsMgr::CalcValue(TalentDef const& def, uint32 itemLevel, uint8 qu
     else
         base = int32(std::ceil(def.base));
 
+    uint8 const q = std::min<uint8>(quality, NUM_QUALITIES - 1);
+
+    // Исключение (решение 2026-07-06): износ - ровные ступени 50/65/80,
+    // "чтобы выглядело ровно", на геймплей влияет слабо.
+    if (def.effect == "DURA_SAVE")
+        return base + 15 * int32(q);
+
     // Каждая ступень качества даёт МИНИМУМ +1 к предыдущей (решение
     // 2026-07-06), иначе множитель на малых базах не ощущается:
     // значение(q) = max(значение(q-1) + 1, ceil(база * mult[q])).
-    uint8 const q = std::min<uint8>(quality, NUM_QUALITIES - 1);
     int32 value = base;
     for (uint8 tier = 1; tier <= q; ++tier)
         value = std::max(value + 1, int32(std::ceil(float(base) * _qualityMults[tier])));
