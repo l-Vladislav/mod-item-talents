@@ -362,7 +362,14 @@ end
 
 local hint -- объявлен ниже (футер)
 
-local function SetNodeState(btn, state)
+-- Цвет окантовки узла = КАЧЕСТВО ролла перка (обычный/отличный/совершенный)
+local QUALITY_RING = {
+    [0] = { r = 0.90, g = 0.90, b = 0.90 },
+    [1] = { r = 0.12, g = 1.00, b = 0.00 },
+    [2] = { r = 0.64, g = 0.21, b = 0.93 },
+}
+
+local function SetNodeState(btn, state, quality)
     btn.state = state
     local icon, ring, glow, lock = btn.icon, btn.ring, btn.glow, btn.lock
     icon:SetDesaturated(false)
@@ -372,31 +379,35 @@ local function SetNodeState(btn, state)
     glow.pulse:Stop()
     lock:Hide()
 
+    -- Окантовка показывает качество, состояние - яркость кольца + свечение
+    local qc = QUALITY_RING[quality or 0] or QUALITY_RING[0]
+    local dim = 1.0
+
     if state == "chosen" then
-        ring:SetVertexColor(1.0, 0.82, 0.0)
         glow:SetVertexColor(1.0, 0.82, 0.15)
         glow:SetAlpha(0.6)
         glow:Show()
     elseif state == "avail" then
-        ring:SetVertexColor(0.62, 0.90, 0.36)
         glow:SetVertexColor(0.55, 0.95, 0.35)
         glow:SetAlpha(0.5)
         glow:Show()
         glow.pulse:Play()
     elseif state == "open" then -- ряд открыт, но нет свободных очков
-        ring:SetVertexColor(0.42, 0.55, 0.38)
+        dim = 0.7
         icon:SetVertexColor(0.7, 0.7, 0.7)
     elseif state == "dim" then  -- в ряду уже есть другой выбор
-        ring:SetVertexColor(0.32, 0.34, 0.40)
+        dim = 0.4
         icon:SetDesaturated(true)
         icon:SetAlpha(0.4)
     else                        -- locked
-        ring:SetVertexColor(0.25, 0.27, 0.33)
+        dim = 0.35
         icon:SetDesaturated(true)
         icon:SetAlpha(0.55)
         icon:SetVertexColor(0.5, 0.5, 0.5)
         lock:Show()
     end
+
+    ring:SetVertexColor(qc.r * dim, qc.g * dim, qc.b * dim)
 end
 
 local function NodeOnEnter(self)
@@ -732,7 +743,7 @@ local function Render()
             else
                 state = "open"
             end
-            SetNodeState(btn, state)
+            SetNodeState(btn, state, opt and opt.quality or 0)
         end
     end
 
