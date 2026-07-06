@@ -40,7 +40,10 @@ local SLOT_LIST = {
 -- effect-код сервера -> иконка + шаблон описания (значение приходит в OPT)
 local EFFECTS = {
     STAT_STA           = { icon = "Spell_Holy_WordFortitude",        fmt = "+%d к выносливости" },
+    STAT_STR           = { icon = "Spell_Nature_Strength",           fmt = "+%d к силе" },
     STAT_AGI           = { icon = "Ability_Hunter_AspectOfTheMonkey", fmt = "+%d к ловкости" },
+    STAT_INT           = { icon = "Spell_Holy_ArcaneIntellect",      fmt = "+%d к интеллекту" },
+    STAT_SPI           = { icon = "Spell_Shadow_Burningspirit",      fmt = "+%d к духу" },
     ATTACK_POWER       = { icon = "Ability_Warrior_BattleShout",     fmt = "+%d к силе атаки (ближней и дальней)" },
     SPELL_POWER        = { icon = "Spell_Holy_MagicalSentry",        fmt = "+%d к силе заклинаний" },
     RESIST_ALL         = { icon = "Spell_Nature_SpiritArmor",        fmt = "+%d к сопротивлению всем школам магии" },
@@ -410,6 +413,11 @@ local function NodeOnEnter(self)
 
     GameTooltip:SetText(opt.name, 1.0, 0.82, 0.0)
     GameTooltip:AddLine(EffectDesc(opt.effect, opt.value), 1, 1, 1, 1)
+    if opt.quality == 1 then
+        GameTooltip:AddLine("Качество перка: отличное (+25%)", 0.12, 1.0, 0.0)
+    elseif opt.quality == 2 then
+        GameTooltip:AddLine("Качество перка: совершенное (+50%)", 0.64, 0.21, 0.93)
+    end
 
     local state = self.state
     if state == "chosen" then
@@ -859,11 +867,13 @@ local function ParseLine(msg)
             return true
         end
 
-        local oRow, oChoice, effect, value, name =
-            msg:match("^ITALENT:OPT:(%d+):(%d+):([%w_]+):(%-?%d+):(.+)$")
+        -- OPT:<row>:<slot>:<effect>:<value>:<quality>:<name>
+        local oRow, oSlot, effect, value, quality, name =
+            msg:match("^ITALENT:OPT:(%d+):(%d+):([%w_]+):(%-?%d+):(%d+):(.+)$")
         if oRow then
-            pending.rows[tonumber(oRow)].opts[tonumber(oChoice)] = {
-                effect = effect, value = tonumber(value), name = name,
+            pending.rows[tonumber(oRow)].opts[tonumber(oSlot)] = {
+                effect = effect, value = tonumber(value),
+                quality = tonumber(quality), name = name,
             }
             return true
         end

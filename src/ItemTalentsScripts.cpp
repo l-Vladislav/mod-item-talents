@@ -4,11 +4,13 @@
  * Протокол аддона (ADDON_UI.md §4), ответы SYSTEM-сообщениями с префиксом ITALENT:
  *   .itemtalent info <bag> <slot> | info inv <slot>
  *       ITALENT:HDR:<guid>:<ilvl>:<quality>:<pool>:<rowsOpen>:<nearMaster>:<kills>:<freePts>:<nextNeed>
- *       ITALENT:ROW:<row>:<chosen 0..3>
- *       ITALENT:OPT:<row>:<choice>:<effect>:<value>:<name_ru>
+ *       ITALENT:ROW:<row>:<chosen slot 0..3>
+ *       ITALENT:OPT:<row>:<slot 1..3>:<effect>:<value>:<perkQuality 0..2>:<name_ru>
  *       ITALENT:END
- *   .itemtalent choose <itemGuidLow> <row> <choice>  -> ITALENT:OK + свежий info | ITALENT:ERR:<код>
- *   .itemtalent reset  <itemGuidLow> <row>           -> ITALENT:OK + свежий info | ITALENT:ERR:<код>
+ *     OPT-строки - по РОЛЛАМ предмета (3 случайных варианта из меню ряда,
+ *     роллятся лениво в EnsureState); value уже с множителем качества.
+ *   .itemtalent choose <itemGuidLow> <row> <slot>  -> ITALENT:OK + свежий info | ITALENT:ERR:<код>
+ *   .itemtalent reset  <itemGuidLow> <row>         -> ITALENT:OK + свежий info | ITALENT:ERR:<код>
  *   .itemtalent list -> ITALENT:ITEM:<guid>:<pool>:<quality>:<kills>:<free>:<имя> ... ITALENT:END
  *
  * Координаты info - клиентские: bag 0 (рюкзак, слоты 1..16), bag 1..4 (слоты 1..N);
@@ -140,6 +142,7 @@ private:
     {
         ItemTemplate const* proto = item->GetTemplate();
         std::optional<char> pool = ItemTalentsMgr::GetPool(proto->Class, proto->SubClass);
+        // EnsureState лениво роллит слоты предмета (EnsureRolled внутри)
         ItemTalents::ItemState& state = sItemTalentsMgr->EnsureState(player, item);
 
         uint8 const rowsOpen = ItemTalentsMgr::RowsOpenForQuality(proto->Quality);
@@ -153,11 +156,19 @@ private:
         for (uint8 row = 1; row <= ItemTalents::MAX_ROWS; ++row)
         {
             handler->PSendSysMessage("ITALENT:ROW:{}:{}", row, state.rows[row - 1]);
-            for (uint8 choice = 1; choice <= ItemTalents::MAX_CHOICES; ++choice)
-                if (ItemTalents::TalentDef const* def = sItemTalentsMgr->GetDef(*pool, row, choice))
-                    handler->PSendSysMessage("ITALENT:OPT:{}:{}:{}:{}:{}", row, choice,
-                        def->effect, ItemTalentsMgr::CalcValue(*def, proto->ItemLevel),
-                        def->nameRu);
+            for (uint8 slot = 1; slot <= ItemTalents::MAX_SLOTS; ++slot)
+            {
+                ItemTalents::RollSlot const& roll = state.rolls[row - 1][slot - 1];
+                if (!roll.choice)
+                    continue;
+
+                if (ItemTalents::TalentDef const* def =
+                    sItemTalentsMgr->GetDef(*pool, row, roll.choice))
+                    handler->PSendSysMessage("ITALENT:OPT:{}:{}:{}:{}:{}:{}", row, slot,
+                        def->effect,
+                        sItemTalentsMgr->CalcValue(*def, proto->ItemLevel, roll.quality),
+                        roll.quality, def->nameRu);
+            }
         }
 
         handler->PSendSysMessage("ITALENT:END");
@@ -260,9 +271,9 @@ private:
         return true;
     }
 
-    // choose <itemGuidLow> <row> <choice>
+    // choose <itemGuidLow> <row> <slot>
     static bool HandleChooseCommand(ChatHandler* handler, uint32 itemGuidLow, uint8 row,
-        uint8 choice)
+        uint8 slot)
     {
         Player* player = handler->GetSession()->GetPlayer();
         if (!sItemTalentsMgr->IsEnabled())
@@ -271,8 +282,8 @@ private:
             return true;
         }
 
-        if (row < 1 || row > ItemTalents::MAX_ROWS || choice < 1
-            || choice > ItemTalents::MAX_CHOICES)
+        if (row < 1 || row > ItemTalents::MAX_ROWS || slot < 1
+            || slot > ItemTalents::MAX_SLOTS)
         {
             SendError(handler, "BAD_ARGS");
             return true;
@@ -297,13 +308,17 @@ private:
             return true;
         }
 
-        if (!sItemTalentsMgr->GetDef(*pool, row, choice))
+        // EnsureState лениво роллит слоты (EnsureRolled внутри)
+        ItemTalents::ItemState& state = sItemTalentsMgr->EnsureState(player, item);
+
+        // Слот должен быть роллен, а его choice - существовать в сиде
+        ItemTalents::RollSlot const& roll = state.rolls[row - 1][slot - 1];
+        if (!roll.choice || !sItemTalentsMgr->GetDef(*pool, row, roll.choice))
         {
             SendError(handler, "BAD_CHOICE");
             return true;
         }
 
-        ItemTalents::ItemState& state = sItemTalentsMgr->EnsureState(player, item);
         if (state.rows[row - 1])
         {
             SendError(handler, "ALREADY_CHOSEN");
@@ -322,8 +337,8 @@ private:
             return true;
         }
 
-        sItemTalentsMgr->SaveChoice(player, item, row, choice);
-        sItemTalentsMgr->ApplyTalent(player, item, row, choice, true);
+        sItemTalentsMgr->SaveChoice(player, item, row, slot);
+        sItemTalentsMgr->ApplyTalent(player, item, row, slot, true);
 
         // Первый вложенный талант привязывает предмет (DESIGN §2)
         if (!item->IsSoulBound())
@@ -358,8 +373,8 @@ private:
             return true;
 
         ItemTalents::ItemState& state = sItemTalentsMgr->EnsureState(player, item);
-        uint8 const oldChoice = state.rows[row - 1];
-        if (!oldChoice)
+        uint8 const oldSlot = state.rows[row - 1]; // rowN = выбранный слот 1..3
+        if (!oldSlot)
         {
             SendError(handler, "NOT_CHOSEN");
             return true;
@@ -371,7 +386,7 @@ private:
             return true;
         }
 
-        sItemTalentsMgr->ApplyTalent(player, item, row, oldChoice, false);
+        sItemTalentsMgr->ApplyTalent(player, item, row, oldSlot, false);
         sItemTalentsMgr->ResetChoice(player, item, row);
 
         handler->PSendSysMessage("ITALENT:OK");

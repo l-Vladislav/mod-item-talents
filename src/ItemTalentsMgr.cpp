@@ -8,11 +8,13 @@
 
 #include "ItemTalentsMgr.h"
 #include "Config.h"
+#include "Containers.h"
 #include "DatabaseEnv.h"
 #include "Item.h"
 #include "ItemTemplate.h"
 #include "Log.h"
 #include "Player.h"
+#include "Random.h"
 #include "SharedDefines.h"
 #include "StringConvert.h"
 #include "StringFormat.h"
@@ -23,11 +25,15 @@
 #include "PlayerbotAI.h"
 #include "PlayerbotMgr.h"
 #include <cmath>
+#include <numeric>
 
 using ItemTalents::ItemState;
+using ItemTalents::RollSlot;
 using ItemTalents::TalentDef;
-using ItemTalents::MAX_CHOICES;
+using ItemTalents::MAX_MENU_CHOICES;
 using ItemTalents::MAX_ROWS;
+using ItemTalents::MAX_SLOTS;
+using ItemTalents::NUM_QUALITIES;
 
 namespace
 {
@@ -83,6 +89,37 @@ void ItemTalentsMgr::LoadConfig()
         if (Optional<uint32> entry = Acore::StringTo<uint32>(token))
             _masterEntries.push_back(*entry);
 
+    // Качество ролла: веса выпадения (Обычный/Отличный/Совершенный) и
+    // множители значения перка. Кол-во != 3 -> дефолты.
+    _qualityChances = { 70.0, 25.0, 5.0 };
+    std::string const weights =
+        sConfigMgr->GetOption<std::string>("ItemTalents.QualityWeights", "70,25,5");
+    std::vector<double> parsedWeights;
+    for (std::string_view token : Acore::Tokenize(weights, ',', false))
+        if (Optional<double> weight = Acore::StringTo<double>(token))
+            parsedWeights.push_back(*weight);
+    if (parsedWeights.size() == NUM_QUALITIES
+        && std::accumulate(parsedWeights.begin(), parsedWeights.end(), 0.0) > 0.0)
+        std::copy(parsedWeights.begin(), parsedWeights.end(), _qualityChances.begin());
+    else
+        LOG_WARN("module", "mod-item-talents: ItemTalents.QualityWeights '{}' is invalid "
+            "(need {} values with positive sum). Using defaults 70,25,5.", weights,
+            uint32(NUM_QUALITIES));
+
+    _qualityMults = { 1.0f, 1.25f, 1.5f };
+    std::string const mults =
+        sConfigMgr->GetOption<std::string>("ItemTalents.QualityMults", "1.0,1.25,1.5");
+    std::vector<float> parsedMults;
+    for (std::string_view token : Acore::Tokenize(mults, ',', false))
+        if (Optional<float> mult = Acore::StringTo<float>(token))
+            parsedMults.push_back(*mult);
+    if (parsedMults.size() == NUM_QUALITIES)
+        std::copy(parsedMults.begin(), parsedMults.end(), _qualityMults.begin());
+    else
+        LOG_WARN("module", "mod-item-talents: ItemTalents.QualityMults '{}' has {} valid "
+            "values, expected {}. Using defaults 1.0,1.25,1.5.", mults, parsedMults.size(),
+            uint32(NUM_QUALITIES));
+
     LOG_INFO("module", "mod-item-talents: enable={} maxRow={} masters={} range={:.1f} "
         "ignoreBots={}", _enable, _maxImplementedRow, _masterEntries.size(), _masterRange,
         _ignoreBots);
@@ -91,6 +128,7 @@ void ItemTalentsMgr::LoadConfig()
 void ItemTalentsMgr::LoadDefinitions()
 {
     _defs.clear();
+    _menus.clear();
     _defsLoaded = false;
 
     if (!_enable)
@@ -114,6 +152,14 @@ void ItemTalentsMgr::LoadDefinitions()
         return;
     }
 
+    if (!CharTableExists("item_talent_rolls"))
+    {
+        LOG_WARN("module", "mod-item-talents: acore_characters.item_talent_rolls is missing; "
+            "module disabled until SQL is applied.");
+        _enable = false;
+        return;
+    }
+
     QueryResult result = WorldDatabase.Query(
         "SELECT pool, `row`, choice, name_ru, desc_ru, effect, base, per_ilvl FROM item_talent_def");
     if (!result)
@@ -130,7 +176,8 @@ void ItemTalentsMgr::LoadDefinitions()
         std::string const pool = fields[0].Get<std::string>();
         int8 const row = fields[1].Get<int8>();
         int8 const choice = fields[2].Get<int8>();
-        if (pool.empty() || row < 1 || row > int8(MAX_ROWS) || choice < 1 || choice > int8(MAX_CHOICES))
+        if (pool.empty() || row < 1 || row > int8(MAX_ROWS) || choice < 1
+            || choice > int8(MAX_MENU_CHOICES))
         {
             LOG_WARN("module", "mod-item-talents: skipped bad item_talent_def row "
                 "(pool '{}', row {}, choice {}).", pool, row, choice);
@@ -144,11 +191,13 @@ void ItemTalentsMgr::LoadDefinitions()
         def.base = fields[6].Get<float>();
         def.perIlvl = fields[7].Get<float>();
         _defs[MakeKey(pool[0], uint8(row), uint8(choice))] = std::move(def);
+        _menus[MakeKey(pool[0], uint8(row), 0)].push_back(uint8(choice));
         ++count;
     } while (result->NextRow());
 
     _defsLoaded = true;
-    LOG_INFO("module", "mod-item-talents: loaded {} talent definitions.", count);
+    LOG_INFO("module", "mod-item-talents: loaded {} talent definitions in {} row menus.",
+        count, _menus.size());
 }
 
 bool ItemTalentsMgr::ShouldIgnorePlayer(Player* player) const
@@ -233,13 +282,25 @@ TalentDef const* ItemTalentsMgr::GetDef(char pool, uint8 row, uint8 choice) cons
     return itr != _defs.end() ? &itr->second : nullptr;
 }
 
-int32 ItemTalentsMgr::CalcValue(TalentDef const& def, uint32 itemLevel)
+std::vector<uint8> const* ItemTalentsMgr::GetMenu(char pool, uint8 row) const
 {
-    // Флэт скейлится от ilvl (минимум 1); процентные эффекты - фикс в base.
-    if (def.perIlvl > 0.0f)
-        return std::max(1, int32(std::ceil(def.base + def.perIlvl * float(itemLevel))));
+    auto itr = _menus.find(MakeKey(pool, row, 0));
+    return itr != _menus.end() ? &itr->second : nullptr;
+}
 
-    return int32(def.base);
+int32 ItemTalentsMgr::CalcValue(TalentDef const& def, uint32 itemLevel, uint8 quality) const
+{
+    float const mult = _qualityMults[std::min<uint8>(quality, NUM_QUALITIES - 1)];
+
+    // Флэт скейлится от ilvl, затем множитель качества, ceil, минимум 1.
+    if (def.perIlvl > 0.0f)
+    {
+        float const flat = std::ceil(def.base + def.perIlvl * float(itemLevel));
+        return std::max(1, int32(std::ceil(flat * mult)));
+    }
+
+    // Процентные эффекты (per_ilvl == 0): фикс в base, качество тоже умножает.
+    return int32(std::ceil(def.base * mult));
 }
 
 // ---------------------------------------------------------------------------
@@ -272,6 +333,28 @@ void ItemTalentsMgr::LoadPlayerState(Player* player)
         state.kills = fields[6].Get<uint32>();
         state.dirtyKills = 0;
     } while (result->NextRow());
+
+    // Роллы тех же предметов вторым запросом. JOIN на item_talents: владельца
+    // знает только она; предмет с роллами, но без строки item_talents, сюда
+    // не попадёт - его добирает точечный путь EnsureState.
+    QueryResult rolls = CharacterDatabase.Query(
+        "SELECT r.item_guid, r.`row`, r.slot, r.choice, r.quality FROM item_talent_rolls r "
+        "JOIN item_talents t ON t.item_guid = r.item_guid WHERE t.owner_guid = {}", ownerGuid);
+    if (!rolls)
+        return;
+
+    do
+    {
+        Field* fields = rolls->Fetch();
+        uint8 const row = fields[1].Get<uint8>();
+        uint8 const slot = fields[2].Get<uint8>();
+        if (row < 1 || row > MAX_ROWS || slot < 1 || slot > MAX_SLOTS)
+            continue;
+
+        RollSlot& roll = states[fields[0].Get<uint32>()].rolls[row - 1][slot - 1];
+        roll.choice = fields[3].Get<uint8>();
+        roll.quality = fields[4].Get<uint8>();
+    } while (rolls->NextRow());
 }
 
 void ItemTalentsMgr::UnloadPlayerState(Player* player)
@@ -299,23 +382,127 @@ ItemState& ItemTalentsMgr::EnsureState(Player* player, Item* item)
     OwnerStates& states = _states[ownerGuid];
     ObjectGuid::LowType const itemGuid = item->GetGUID().GetCounter();
     auto itr = states.find(itemGuid);
-    if (itr != states.end())
-        return itr->second;
-
-    // Мимо владельческой выборки: предмет мог прийти от другого игрока
-    // (owner_guid в БД обновляется только при INSERT) - точечный SELECT.
-    ItemState state;
-    if (QueryResult result = CharacterDatabase.Query(
-        "SELECT row1, row2, row3, row4, row5, kills FROM item_talents WHERE item_guid = {}",
-        itemGuid))
+    if (itr == states.end())
     {
-        Field* fields = result->Fetch();
-        for (uint8 i = 0; i < MAX_ROWS; ++i)
-            state.rows[i] = fields[i].Get<uint8>();
-        state.kills = fields[5].Get<uint32>();
+        // Мимо владельческой выборки: предмет мог прийти от другого игрока
+        // (owner_guid в БД обновляется только при INSERT) - точечный SELECT.
+        ItemState state;
+        if (QueryResult result = CharacterDatabase.Query(
+            "SELECT row1, row2, row3, row4, row5, kills FROM item_talents WHERE item_guid = {}",
+            itemGuid))
+        {
+            Field* fields = result->Fetch();
+            for (uint8 i = 0; i < MAX_ROWS; ++i)
+                state.rows[i] = fields[i].Get<uint8>();
+            state.kills = fields[5].Get<uint32>();
+        }
+
+        if (QueryResult rolls = CharacterDatabase.Query(
+            "SELECT `row`, slot, choice, quality FROM item_talent_rolls WHERE item_guid = {}",
+            itemGuid))
+            do
+            {
+                Field* fields = rolls->Fetch();
+                uint8 const row = fields[0].Get<uint8>();
+                uint8 const slot = fields[1].Get<uint8>();
+                if (row < 1 || row > MAX_ROWS || slot < 1 || slot > MAX_SLOTS)
+                    continue;
+
+                RollSlot& roll = state.rolls[row - 1][slot - 1];
+                roll.choice = fields[2].Get<uint8>();
+                roll.quality = fields[3].Get<uint8>();
+            } while (rolls->NextRow());
+
+        itr = states.emplace(itemGuid, state).first;
     }
 
-    return states.emplace(itemGuid, state).first->second;
+    // Ленивый ролл слотов (DESIGN "Роллы перков и качество"): только реальным
+    // игрокам - предметы ботов не роллим.
+    if (!ShouldIgnorePlayer(player))
+        EnsureRolled(player, item);
+
+    return itr->second;
+}
+
+void ItemTalentsMgr::EnsureRolled(Player* player, Item* item)
+{
+    if (!IsEnabled() || !player || !item)
+        return;
+
+    // Вызывается из EnsureState: состояние уже в кэше.
+    ItemState* state = GetState(player->GetGUID().GetCounter(), item->GetGUID().GetCounter());
+    if (!state)
+        return;
+
+    // Любой существующий ролл = предмет уже роллен (ряд 1 в сиде есть всегда,
+    // но проверяем все ряды - защита от урезанного сида).
+    for (auto const& rowRolls : state->rolls)
+        for (RollSlot const& roll : rowRolls)
+            if (roll.choice)
+                return;
+
+    ItemTemplate const* proto = item->GetTemplate();
+    if (!proto)
+        return;
+
+    std::optional<char> pool = GetPool(proto->Class, proto->SubClass);
+    if (!pool)
+        return;
+
+    std::string values;
+    for (uint8 row = 1; row <= MAX_ROWS; ++row)
+    {
+        std::vector<uint8> const* menu = GetMenu(*pool, row);
+        if (!menu || menu->empty())
+            continue;
+
+        // Миграция старых данных: rowN раньше хранил choice 1..3 - слот с тем
+        // же номером закрепляет старый choice с качеством 0, применённые статы
+        // не меняются (rowN как СЛОТ указывает туда же).
+        uint8 const legacy = state->rows[row - 1] <= MAX_SLOTS ? state->rows[row - 1] : 0;
+
+        std::vector<uint8> options = *menu;
+        if (legacy)
+            std::erase(options, legacy);
+        Acore::Containers::RandomShuffle(options);
+
+        std::size_t next = 0;
+        for (uint8 slot = 1; slot <= MAX_SLOTS; ++slot)
+        {
+            RollSlot& roll = state->rolls[row - 1][slot - 1];
+            if (legacy && slot == legacy)
+            {
+                roll.choice = legacy;
+                roll.quality = 0;
+            }
+            else if (next < options.size())
+            {
+                roll.choice = options[next++];
+                roll.quality = RollQuality();
+            }
+            else
+                continue; // вариантов в меню меньше, чем слотов
+
+            if (!values.empty())
+                values += ',';
+            values += Acore::StringFormat("({},{},{},{},{})", item->GetGUID().GetCounter(),
+                row, slot, roll.choice, roll.quality);
+        }
+    }
+
+    if (values.empty())
+        return;
+
+    // Sync-запись допустима: ролл - разовое событие на предмет.
+    CharacterDatabase.DirectExecute(
+        "INSERT INTO item_talent_rolls (item_guid, `row`, slot, choice, quality) VALUES "
+        + values + " ON DUPLICATE KEY UPDATE choice = VALUES(choice), "
+        "quality = VALUES(quality)");
+}
+
+uint8 ItemTalentsMgr::RollQuality() const
+{
+    return uint8(urandweighted(NUM_QUALITIES, _qualityChances.data()));
 }
 
 // ---------------------------------------------------------------------------
@@ -335,8 +522,8 @@ uint32 ItemTalentsMgr::EarnedPoints(uint32 kills) const
 uint32 ItemTalentsMgr::SpentPoints(ItemState const& state)
 {
     uint32 spent = 0;
-    for (uint8 choice : state.rows)
-        if (choice)
+    for (uint8 slot : state.rows)
+        if (slot)
             ++spent;
 
     return spent;
@@ -416,9 +603,19 @@ void ItemTalentsMgr::FlushKills(Player* player)
 // Применение статов
 // ---------------------------------------------------------------------------
 
-void ItemTalentsMgr::ApplyTalent(Player* player, Item* item, uint8 row, uint8 choice,
-    bool apply) const
+void ItemTalentsMgr::ApplyTalent(Player* player, Item* item, uint8 row, uint8 slot, bool apply)
 {
+    if (row < 1 || row > MAX_ROWS || slot < 1 || slot > MAX_SLOTS)
+        return;
+
+    ItemState* state = GetState(player->GetGUID().GetCounter(), item->GetGUID().GetCounter());
+    if (!state)
+        return;
+
+    RollSlot const& roll = state->rolls[row - 1][slot - 1];
+    if (!roll.choice)
+        return;
+
     ItemTemplate const* proto = item->GetTemplate();
     if (!proto)
         return;
@@ -427,11 +624,11 @@ void ItemTalentsMgr::ApplyTalent(Player* player, Item* item, uint8 row, uint8 ch
     if (!pool)
         return;
 
-    TalentDef const* def = GetDef(*pool, row, choice);
+    TalentDef const* def = GetDef(*pool, row, roll.choice);
     if (!def)
         return;
 
-    ApplyEffect(player, def->effect, CalcValue(*def, proto->ItemLevel), apply);
+    ApplyEffect(player, def->effect, CalcValue(*def, proto->ItemLevel, roll.quality), apply);
 }
 
 void ItemTalentsMgr::ApplyAllTalents(Player* player, Item* item, bool apply)
@@ -457,8 +654,8 @@ void ItemTalentsMgr::ApplyAllTalents(Player* player, Item* item, bool apply)
     }
 
     for (uint8 row = 1; row <= MAX_ROWS; ++row)
-        if (uint8 choice = state->rows[row - 1])
-            ApplyTalent(player, item, row, choice, apply);
+        if (uint8 slot = state->rows[row - 1])
+            ApplyTalent(player, item, row, slot, apply);
 }
 
 // Зеркалит Player::_ApplyItemBonuses для соответствующих ITEM_MOD_*.
@@ -476,6 +673,21 @@ void ItemTalentsMgr::ApplyEffect(Player* player, std::string const& effect, int3
     {
         player->HandleStatFlatModifier(UNIT_MOD_STAT_AGILITY, BASE_VALUE, fval, apply);
         player->UpdateStatBuffMod(STAT_AGILITY);
+    }
+    else if (effect == "STAT_STR") // как ITEM_MOD_STRENGTH
+    {
+        player->HandleStatFlatModifier(UNIT_MOD_STAT_STRENGTH, BASE_VALUE, fval, apply);
+        player->UpdateStatBuffMod(STAT_STRENGTH);
+    }
+    else if (effect == "STAT_INT") // как ITEM_MOD_INTELLECT
+    {
+        player->HandleStatFlatModifier(UNIT_MOD_STAT_INTELLECT, BASE_VALUE, fval, apply);
+        player->UpdateStatBuffMod(STAT_INTELLECT);
+    }
+    else if (effect == "STAT_SPI") // как ITEM_MOD_SPIRIT
+    {
+        player->HandleStatFlatModifier(UNIT_MOD_STAT_SPIRIT, BASE_VALUE, fval, apply);
+        player->UpdateStatBuffMod(STAT_SPIRIT);
     }
     else if (effect == "ATTACK_POWER") // как ITEM_MOD_ATTACK_POWER (ближняя И дальняя)
     {
@@ -541,10 +753,11 @@ void ItemTalentsMgr::ApplyEffect(Player* player, std::string const& effect, int3
 // Выбор / сброс
 // ---------------------------------------------------------------------------
 
-void ItemTalentsMgr::SaveChoice(Player* player, Item* item, uint8 row, uint8 choice)
+void ItemTalentsMgr::SaveChoice(Player* player, Item* item, uint8 row, uint8 slot)
 {
+    // rowN хранит выбранный СЛОТ 1..3 (choice лежит в item_talent_rolls)
     ItemState& state = EnsureState(player, item);
-    state.rows[row - 1] = choice;
+    state.rows[row - 1] = slot;
 
     // kills в БД = текущее значение минус несброшенная дельта (её допишет FlushKills)
     uint32 const dbKills = state.kills - state.dirtyKills;
@@ -554,7 +767,7 @@ void ItemTalentsMgr::SaveChoice(Player* player, Item* item, uint8 row, uint8 cho
         "owner_guid = VALUES(owner_guid)",
         item->GetGUID().GetCounter(), player->GetGUID().GetCounter(),
         state.rows[0], state.rows[1], state.rows[2], state.rows[3], state.rows[4],
-        dbKills, row, choice);
+        dbKills, row, slot);
 }
 
 void ItemTalentsMgr::ResetChoice(Player* player, Item* item, uint8 row)

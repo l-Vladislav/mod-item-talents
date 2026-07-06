@@ -1,9 +1,12 @@
 # mod-item-talents — «Пробуждение снаряжения»
 
 Модуль AzerothCore (WotLK 3.3.5a): ветка талантов у каждого предмета
-(оружие/броня) — 5 рядов, выбор 1 из 3. Качество предмета открывает ряды,
-опыт предмета (убийства, пока вещь надета) даёт очки талантов. Прокачка
-привязана к конкретному предмету (GUID), а не к игроку.
+(оружие/броня) — 5 рядов, выбор 1 из 3 слотов. Меню ряда держит до ~10
+вариантов; предмет при первом обращении лениво роллит 3 случайных с
+качеством (Обычный x1.0 / Отличный x1.25 / Совершенный x1.5, веса 70/25/5).
+Качество предмета открывает ряды, опыт предмета (убийства, пока вещь
+надета) даёт очки талантов. Прокачка привязана к конкретному предмету
+(GUID), а не к игроку.
 
 ## Установка
 
@@ -28,7 +31,9 @@
 - Команда `.itemtalent` (протокол ITALENT: для аддона ItemTalentUI):
   - `info <bag> <slot>` / `info inv <slot>` — HDR/ROW/OPT/END
     (клиентские координаты: bag 0..4 со слотами с 1; inv 1..19).
-  - `choose <itemGuidLow> <row> <choice>` — выбрать (OK + свежий info).
+    OPT — по роллам предмета:
+    `OPT:<row>:<slot 1..3>:<effect>:<value>:<perkQuality 0..2>:<name_ru>`.
+  - `choose <itemGuidLow> <row> <slot>` — выбрать слот (OK + свежий info).
   - `reset <itemGuidLow> <row>` — сброс ряда (OK + свежий info).
   - `list` — надетые предметы системы (ITEM-строки + END).
   - Коды ошибок: DISABLED, BAD_ARGS, NO_ITEM, NOT_EQUIPPED, NO_POOL, BROKEN,
@@ -38,9 +43,13 @@
 ## Данные
 
 - `acore_world.item_talent_def` — определения талантов (data-driven: пулы
-  A–H x ряды x 3 выбора; значения `ceil(base + per_ilvl * ItemLevel)`).
+  A–H x ряды x choice 1..N (до 15); значения
+  `ceil(ceil(base + per_ilvl * ItemLevel) * qualityMult)`).
   Баланс тюнится SQL-ом без пересборки.
-- `acore_characters.item_talents` — выборы и kills по item_guid.
+- `acore_characters.item_talents` — выборы (rowN = слот 1..3) и kills по
+  item_guid.
+- `acore_characters.item_talent_rolls` — роллы слотов: (item_guid, row,
+  slot 1..3) -> (choice, quality 0..2).
 
 ## Патч ядра
 
