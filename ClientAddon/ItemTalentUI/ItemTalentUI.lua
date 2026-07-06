@@ -1,11 +1,13 @@
 -- ItemTalentUI: панель талантов предмета (mod-item-talents), клиент 3.3.5a.
 --
--- Открытие: Ctrl+ПКМ по предмету в сумке или на кукле персонажа.
+-- Оболочка в стиле TransmogUI: кнопка на окне персонажа (рядом с кнопкой
+-- трансмогрификации), слева колонка слотов экипировки, справа вертикальное
+-- дерево талантов выбранного предмета. Открытие: кнопка на окне персонажа
+-- или /itu. Ctrl+ПКМ убран (обработчики кликов 3.3.5 биндятся к шаблону
+-- при загрузке XML - raw-замена глобала их не перехватывает).
+--
 -- Связь с сервером: команды ".itemtalent ..." через SendChatMessage(SAY),
 -- ответы - SYSTEM-сообщения с префиксом "ITALENT:" (прячутся фильтром чата).
--- Макет: вертикальное дерево 5 рядов x 3 круглых узла (ADDON_UI.md).
-
-local ADDON_PREFIX = "ITALENT:"
 
 -- ---------------------------------------------------------------------------
 -- Статические данные
@@ -17,6 +19,22 @@ local ROWS_META = {
     { label = "ГРАВИРОВКА",  r = 0.00, g = 0.44, b = 0.87 },
     { label = "НАСЫЩЕНИЕ",   r = 0.64, g = 0.21, b = 0.93 },
     { label = "ПРОБУЖДЕНИЕ", r = 1.00, g = 0.50, b = 0.00 },
+}
+
+-- Слоты экипировки, участвующие в системе (клиентские inv-слоты)
+local SLOT_LIST = {
+    { inv = 1,  key = "HeadSlot",          name = "Голова" },
+    { inv = 3,  key = "ShoulderSlot",      name = "Плечи" },
+    { inv = 15, key = "BackSlot",          name = "Спина" },
+    { inv = 5,  key = "ChestSlot",         name = "Грудь" },
+    { inv = 9,  key = "WristSlot",         name = "Запястья" },
+    { inv = 10, key = "HandsSlot",         name = "Кисти рук" },
+    { inv = 6,  key = "WaistSlot",         name = "Пояс" },
+    { inv = 7,  key = "LegsSlot",          name = "Ноги" },
+    { inv = 8,  key = "FeetSlot",          name = "Ступни" },
+    { inv = 16, key = "MainHandSlot",      name = "Правая рука" },
+    { inv = 17, key = "SecondaryHandSlot", name = "Левая рука" },
+    { inv = 18, key = "RangedSlot",        name = "Дальний бой" },
 }
 
 -- effect-код сервера -> иконка + шаблон описания (значение приходит в OPT)
@@ -63,20 +81,26 @@ local ERR_TEXT = {
     NOT_CHOSEN     = "В этом ряду ничего не выбрано.",
 }
 
+-- v1-ограничение сервера: ряды выше не принимают выбор (ROW_SOON).
+-- Продублировано с ItemTalents.MaxImplementedRow - поднимать вместе.
+local MAX_IMPLEMENTED_ROW = 2
+
 -- ---------------------------------------------------------------------------
 -- Состояние
 -- ---------------------------------------------------------------------------
 
-local current = nil  -- разобранный info-блок (см. ParseLine)
-local pending = nil  -- накапливаемый блок HDR..END
-local source  = nil  -- откуда открыли: {bag=..,slot=..} или {inv=..} + link/icon
+local current = nil      -- разобранный info-блок выбранного предмета
+local pending = nil      -- накапливаемый блок HDR..END
+local selectedInv = nil  -- выбранный inv-слот
 local resetMode = false
 local lastInfoAt = 0
+local invChangedAt = 0
 local popupAction = nil
 
-local nodes = {}     -- [row][choice] = button
-local wires = {}     -- пул текстур-сегментов пути
-local rowLocked = {} -- [row] = FontString подписи "закрыто"
+local slotButtons = {}   -- [inv] = button
+local nodes = {}         -- [row][choice] = button
+local wires = {}         -- пул текстур-сегментов пути
+local rowLocked = {}     -- [row] = FontString пометки справа от ряда
 
 local function Msg(text)
     DEFAULT_CHAT_FRAME:AddMessage("|cffc8a24b[Таланты]|r " .. text, 1.0, 0.85, 0.4)
@@ -95,12 +119,12 @@ local function EffectDesc(effect, value)
 end
 
 -- ---------------------------------------------------------------------------
--- Главное окно
+-- Главное окно (оболочка в стиле TransmogUI)
 -- ---------------------------------------------------------------------------
 
 local f = CreateFrame("Frame", "ItemTalentUIFrame", UIParent)
-f:SetWidth(400)
-f:SetHeight(566)
+f:SetWidth(620)
+f:SetHeight(640)
 f:SetPoint("CENTER")
 f:SetFrameStrata("HIGH")
 f:SetMovable(true)
@@ -114,54 +138,123 @@ f:SetScript("OnDragStop", function(self)
     ItemTalentUIDB.pos = { point = point, relPoint = relPoint, x = x, y = y }
 end)
 f:SetBackdrop({
-    bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
-    edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-    tile = true, tileSize = 16, edgeSize = 16,
-    insets = { left = 4, right = 4, top = 4, bottom = 4 },
+    bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+    edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+    tile = true, tileSize = 32, edgeSize = 32,
+    insets = { left = 11, right = 12, top = 12, bottom = 11 },
 })
-f:SetBackdropColor(0.04, 0.04, 0.07, 0.96)
-f:SetBackdropBorderColor(0.78, 0.63, 0.29)
 f:Hide()
 tinsert(UISpecialFrames, "ItemTalentUIFrame")
 
 local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
-close:SetPoint("TOPRIGHT", -1, -1)
+close:SetPoint("TOPRIGHT", -5, -8)
 
 local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-title:SetPoint("TOP", 0, -12)
+title:SetPoint("TOP", 0, -16)
 title:SetText("|cffc8a24bПробуждение снаряжения|r")
 
--- Шапка: иконка + имя + подстрока
+-- Разделитель между колонкой слотов и деревом
+local divider = f:CreateTexture(nil, "ARTWORK")
+divider:SetTexture(0.45, 0.4, 0.25, 0.35)
+divider:SetWidth(1)
+divider:SetPoint("TOPLEFT", 92, -44)
+divider:SetPoint("BOTTOMLEFT", 92, 24)
+
+-- ---------------------------------------------------------------------------
+-- Колонка слотов экипировки (слева)
+-- ---------------------------------------------------------------------------
+
+local SelectSlot -- forward
+
+local function UpdateSlotButtons()
+    for _, def in ipairs(SLOT_LIST) do
+        local btn = slotButtons[def.inv]
+        local tex = GetInventoryItemTexture("player", def.inv)
+        btn:SetNormalTexture(tex or btn.emptyTex)
+        btn:GetNormalTexture():SetTexCoord(0.07, 0.93, 0.07, 0.93)
+        if tex then
+            btn:GetNormalTexture():SetVertexColor(1, 1, 1)
+        else
+            btn:GetNormalTexture():SetVertexColor(0.35, 0.35, 0.35)
+        end
+        if selectedInv == def.inv then
+            btn.sel:Show()
+        else
+            btn.sel:Hide()
+        end
+    end
+end
+
+local slotIndex = 0
+local function CreateSlotButton(def)
+    slotIndex = slotIndex + 1
+    local btn = CreateFrame("Button", "ItemTalentUISlot" .. slotIndex, f, "ItemButtonTemplate")
+    btn.def = def
+    local _, emptyTex = GetInventorySlotInfo(def.key)
+    btn.emptyTex = emptyTex
+
+    btn.sel = btn:CreateTexture(nil, "OVERLAY")
+    btn.sel:SetTexture("Interface\\Buttons\\CheckButtonHilight")
+    btn.sel:SetBlendMode("ADD")
+    btn.sel:SetAllPoints()
+    btn.sel:Hide()
+
+    btn:SetScript("OnClick", function(self) SelectSlot(self.def.inv) end)
+    btn:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        local link = GetInventoryItemLink("player", self.def.inv)
+        if link then
+            GameTooltip:SetHyperlink(link)
+        else
+            GameTooltip:SetText(self.def.name)
+            GameTooltip:AddLine("Слот пуст", 0.65, 0.66, 0.72)
+        end
+        GameTooltip:Show()
+    end)
+    btn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+    slotButtons[def.inv] = btn
+    return btn
+end
+
+for i, def in ipairs(SLOT_LIST) do
+    local btn = CreateSlotButton(def)
+    btn:SetPoint("TOPLEFT", 30, -52 - (i - 1) * 44)
+end
+
+-- ---------------------------------------------------------------------------
+-- Правая область: шапка предмета + полоса опыта
+-- ---------------------------------------------------------------------------
+
 local headIcon = f:CreateTexture(nil, "ARTWORK")
 headIcon:SetWidth(38)
 headIcon:SetHeight(38)
-headIcon:SetPoint("TOPLEFT", 16, -32)
+headIcon:SetPoint("TOPLEFT", 110, -48)
 headIcon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
 
 local headName = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
 headName:SetPoint("TOPLEFT", headIcon, "TOPRIGHT", 10, -1)
-headName:SetPoint("RIGHT", f, "RIGHT", -30, 0)
+headName:SetPoint("RIGHT", f, "RIGHT", -36, 0)
 headName:SetJustifyH("LEFT")
 
 local headSub = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 headSub:SetPoint("TOPLEFT", headName, "BOTTOMLEFT", 0, -4)
-headSub:SetPoint("RIGHT", f, "RIGHT", -16, 0)
+headSub:SetPoint("RIGHT", f, "RIGHT", -24, 0)
 headSub:SetJustifyH("LEFT")
 headSub:SetTextColor(0.65, 0.66, 0.72)
 
--- Полоса опыта предмета
 local xpLabel = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-xpLabel:SetPoint("TOPLEFT", 18, -84)
+xpLabel:SetPoint("TOPLEFT", 110, -98)
 xpLabel:SetJustifyH("LEFT")
 
 local xpRight = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-xpRight:SetPoint("TOPRIGHT", -18, -84)
+xpRight:SetPoint("TOPRIGHT", -24, -98)
 xpRight:SetJustifyH("RIGHT")
 xpRight:SetTextColor(0.65, 0.66, 0.72)
 
 local xpBar = CreateFrame("StatusBar", nil, f)
-xpBar:SetPoint("TOPLEFT", 18, -100)
-xpBar:SetPoint("TOPRIGHT", -18, -100)
+xpBar:SetPoint("TOPLEFT", 110, -114)
+xpBar:SetPoint("TOPRIGHT", -24, -114)
 xpBar:SetHeight(9)
 xpBar:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
 xpBar:SetStatusBarColor(1.0, 0.82, 0.0)
@@ -170,14 +263,16 @@ local xpBg = xpBar:CreateTexture(nil, "BACKGROUND")
 xpBg:SetAllPoints()
 xpBg:SetTexture(0, 0, 0, 0.7)
 
--- Дерево: слой для линий пути (под узлами)
+-- ---------------------------------------------------------------------------
+-- Дерево: линии пути (слой под узлами)
+-- ---------------------------------------------------------------------------
+
 local wireLayer = CreateFrame("Frame", nil, f)
 wireLayer:SetAllPoints()
 
 local function GetWire(i)
     if not wires[i] then
-        local t = wireLayer:CreateTexture(nil, "BORDER")
-        wires[i] = t
+        wires[i] = wireLayer:CreateTexture(nil, "BORDER")
     end
     return wires[i]
 end
@@ -186,19 +281,68 @@ local function HideWires(fromIndex)
     for i = fromIndex, #wires do wires[i]:Hide() end
 end
 
--- Геометрия дерева
-local TREE_TOP = -128           -- y центра первого ряда
-local ROW_STEP = 72
-local NODE_X = { 150, 240, 330 } -- x центров узлов
+-- Геометрия дерева (координаты от TOPLEFT окна)
+local TREE_TOP = -164            -- y центра первого ряда
+local ROW_STEP = 70
+local NODE_X = { 250, 345, 440 } -- x центров узлов
 local NODE_SIZE = 40
+local LABEL_RIGHT_X = 206        -- правый край подписей рядов
+local LOCKNOTE_X = 472           -- левый край пометок "качество"/"скоро"
 
 local function NodeCenter(row, choice)
     return NODE_X[choice], TREE_TOP - (row - 1) * ROW_STEP
 end
 
+local function PlaceSegment(idx, x1, y1, x2, y2, gold)
+    local t = GetWire(idx)
+    if gold then
+        t:SetTexture(1.0, 0.82, 0.0, 0.9)
+    else
+        t:SetTexture(0.4, 0.42, 0.48, 0.5)
+    end
+    local thickness = 2
+    t:ClearAllPoints()
+    if x1 == x2 then
+        t:SetWidth(thickness)
+        t:SetHeight(math.abs(y2 - y1))
+        t:SetPoint("TOP", f, "TOPLEFT", x1, math.max(y1, y2))
+    else
+        t:SetWidth(math.abs(x2 - x1))
+        t:SetHeight(thickness)
+        t:SetPoint("TOPLEFT", f, "TOPLEFT", math.min(x1, x2), y1 + thickness / 2)
+    end
+    t:Show()
+end
+
+local function RedrawWires()
+    local idx = 1
+    if current then
+        for row = 1, 4 do
+            local a = current.rows[row].chosen
+            local b = current.rows[row + 1] and current.rows[row + 1].chosen or 0
+            if a > 0 and b > 0 then
+                local x1, y1 = NodeCenter(row, a)
+                local x2, y2 = NodeCenter(row + 1, b)
+                local half = NODE_SIZE / 2
+                local midY = y1 - half - (ROW_STEP - NODE_SIZE) / 2
+                if x1 == x2 then
+                    PlaceSegment(idx, x1, y1 - half, x2, y2 + half, true); idx = idx + 1
+                else
+                    PlaceSegment(idx, x1, y1 - half, x1, midY, true); idx = idx + 1
+                    PlaceSegment(idx, x1, midY, x2, midY, true); idx = idx + 1
+                    PlaceSegment(idx, x2, midY, x2, y2 + half, true); idx = idx + 1
+                end
+            end
+        end
+    end
+    HideWires(idx)
+end
+
 -- ---------------------------------------------------------------------------
--- Узлы
+-- Узлы дерева
 -- ---------------------------------------------------------------------------
+
+local hint -- объявлен ниже (футер)
 
 local function SetNodeState(btn, state)
     btn.state = state
@@ -236,8 +380,8 @@ local function SetNodeState(btn, state)
 end
 
 local function NodeOnEnter(self)
-    local row, choice = self.row, self.choice
     if not current then return end
+    local row, choice = self.row, self.choice
     local opt = current.rows[row].opts[choice]
     GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
     if not opt then
@@ -271,14 +415,14 @@ local function NodeOnEnter(self)
     else
         if row > current.rowsOpen then
             GameTooltip:AddLine("Закрыто: не хватает качества предмета", 0.8, 0.25, 0.25)
+        elseif row > current.maxRow then
+            GameTooltip:AddLine("Откроется в следующем обновлении", 0.8, 0.66, 0.29)
         else
             GameTooltip:AddLine("Закрыто", 0.8, 0.25, 0.25)
         end
     end
     GameTooltip:Show()
 end
-
-local hint -- объявлен ниже (футер)
 
 local function AskConfirm(text, action)
     popupAction = action
@@ -295,9 +439,13 @@ local function NodeOnClick(self, button)
     local opt = rowData.opts[choice]
 
     if state == "locked" then
-        hint:SetText(row > current.rowsOpen
-            and "Ряд закрыт: прокачайте качество предмета (Gear Ascension)."
-            or "Ряд закрыт.")
+        if row > current.rowsOpen then
+            hint:SetText("Ряд закрыт: прокачайте качество предмета (Gear Ascension).")
+        elseif row > current.maxRow then
+            hint:SetText("Этот ряд откроется в следующем обновлении.")
+        else
+            hint:SetText("Ряд закрыт.")
+        end
         return
     end
 
@@ -348,7 +496,7 @@ local function CreateNode(row, choice)
     btn:SetWidth(NODE_SIZE)
     btn:SetHeight(NODE_SIZE)
     local x, y = NodeCenter(row, choice)
-    btn:SetPoint("CENTER", f, "TOP", x - 200, y) -- x задан от левого края макета 400px
+    btn:SetPoint("CENTER", f, "TOPLEFT", x, y)
     btn.row = row
     btn.choice = choice
 
@@ -399,18 +547,18 @@ local function CreateNode(row, choice)
     return btn
 end
 
--- Подписи рядов + узлы
 for row = 1, 5 do
     local meta = ROWS_META[row]
-    local label = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     local _, y = NodeCenter(row, 1)
-    label:SetPoint("RIGHT", f, "TOP", NODE_X[1] - 200 - 32, y)
+
+    local label = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    label:SetPoint("RIGHT", f, "TOPLEFT", LABEL_RIGHT_X, y)
     label:SetJustifyH("RIGHT")
     label:SetText(meta.label)
     label:SetTextColor(meta.r, meta.g, meta.b)
 
     local locked = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    locked:SetPoint("LEFT", f, "TOP", NODE_X[3] - 200 + 30, y)
+    locked:SetPoint("LEFT", f, "TOPLEFT", LOCKNOTE_X, y)
     locked:SetTextColor(0.5, 0.52, 0.58)
     locked:Hide()
     rowLocked[row] = locked
@@ -421,17 +569,34 @@ for row = 1, 5 do
     end
 end
 
+local function SetTreeShown(shown)
+    for row = 1, 5 do
+        if not shown then rowLocked[row]:Hide() end
+        for choice = 1, 3 do
+            if shown then
+                nodes[row][choice]:Show()
+            else
+                nodes[row][choice]:Hide()
+            end
+        end
+    end
+    if not shown then HideWires(1) end
+end
+
+-- ---------------------------------------------------------------------------
 -- Футер
+-- ---------------------------------------------------------------------------
+
 local summary = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-summary:SetPoint("BOTTOMLEFT", 18, 62)
-summary:SetPoint("BOTTOMRIGHT", -18, 62)
+summary:SetPoint("BOTTOMLEFT", 110, 80)
+summary:SetPoint("BOTTOMRIGHT", -24, 80)
 summary:SetJustifyH("LEFT")
 summary:SetTextColor(0.81, 0.90, 0.66)
 
 local resetBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-resetBtn:SetWidth(150)
+resetBtn:SetWidth(140)
 resetBtn:SetHeight(22)
-resetBtn:SetPoint("BOTTOMLEFT", 18, 34)
+resetBtn:SetPoint("BOTTOMLEFT", 110, 50)
 resetBtn:SetText("Сбросить ряд")
 resetBtn:SetScript("OnClick", function()
     if not current then return end
@@ -444,15 +609,15 @@ resetBtn:SetScript("OnClick", function()
 end)
 
 local closeBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-closeBtn:SetWidth(150)
+closeBtn:SetWidth(140)
 closeBtn:SetHeight(22)
-closeBtn:SetPoint("BOTTOMRIGHT", -18, 34)
+closeBtn:SetPoint("BOTTOMRIGHT", -24, 50)
 closeBtn:SetText("Закрыть")
 closeBtn:SetScript("OnClick", function() f:Hide() end)
 
 hint = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-hint:SetPoint("BOTTOMLEFT", 18, 14)
-hint:SetPoint("BOTTOMRIGHT", -18, 14)
+hint:SetPoint("BOTTOMLEFT", 110, 28)
+hint:SetPoint("BOTTOMRIGHT", -24, 28)
 hint:SetJustifyH("LEFT")
 hint:SetTextColor(0.55, 0.57, 0.63)
 
@@ -471,81 +636,42 @@ StaticPopupDialogs["ITEMTALENTUI_CONFIRM"] = {
 }
 
 -- ---------------------------------------------------------------------------
--- Линии пути (L-образные сегменты между выбранными узлами)
--- ---------------------------------------------------------------------------
-
-local function PlaceSegment(idx, x1, y1, x2, y2, gold)
-    -- координаты от f:TOP, рисуем горизонтальный ИЛИ вертикальный сегмент
-    local t = GetWire(idx)
-    if gold then
-        t:SetTexture(1.0, 0.82, 0.0, 0.9)
-    else
-        t:SetTexture(0.4, 0.42, 0.48, 0.5)
-    end
-    local thickness = 2
-    t:ClearAllPoints()
-    if x1 == x2 then
-        t:SetWidth(thickness)
-        t:SetHeight(math.abs(y2 - y1))
-        t:SetPoint("TOP", f, "TOP", x1 - 200, math.max(y1, y2))
-    else
-        t:SetWidth(math.abs(x2 - x1))
-        t:SetHeight(thickness)
-        t:SetPoint("TOPLEFT", f, "TOP", math.min(x1, x2) - 200, y1 + thickness / 2)
-    end
-    t:Show()
-end
-
-local function RedrawWires()
-    local idx = 1
-    if current then
-        for row = 1, 4 do
-            local a = current.rows[row].chosen
-            local b = current.rows[row + 1] and current.rows[row + 1].chosen or 0
-            if a > 0 and b > 0 then
-                local x1, y1 = NodeCenter(row, a)
-                local x2, y2 = NodeCenter(row + 1, b)
-                local half = NODE_SIZE / 2
-                local midY = y1 - half - (ROW_STEP - NODE_SIZE) / 2
-                if x1 == x2 then
-                    PlaceSegment(idx, x1, y1 - half, x2, y2 + half, true); idx = idx + 1
-                else
-                    PlaceSegment(idx, x1, y1 - half, x1, midY, true); idx = idx + 1
-                    PlaceSegment(idx, x1, midY, x2, midY, true); idx = idx + 1
-                    PlaceSegment(idx, x2, midY, x2, y2 + half, true); idx = idx + 1
-                end
-            end
-        end
-    end
-    HideWires(idx)
-end
-
--- ---------------------------------------------------------------------------
 -- Рендер
 -- ---------------------------------------------------------------------------
+
+local function RenderEmpty(text)
+    current = nil
+    headIcon:SetTexture("Interface\\Icons\\" .. FALLBACK_ICON)
+    headName:SetText("Выберите предмет")
+    headName:SetTextColor(0.8, 0.8, 0.8)
+    headSub:SetText(text or "Кликните по слоту экипировки слева.")
+    xpLabel:SetText("")
+    xpRight:SetText("")
+    xpBar:SetValue(0)
+    summary:SetText("")
+    SetTreeShown(false)
+end
 
 local function Render()
     if not current then return end
 
-    -- Шапка
-    headIcon:SetTexture(source and source.icon or "Interface\\Icons\\" .. FALLBACK_ICON)
+    local link = GetInventoryItemLink("player", selectedInv or 0)
+    local itemName = link and link:match("%[(.-)%]") or ("Предмет " .. current.guid)
+
+    headIcon:SetTexture(GetInventoryItemTexture("player", selectedInv or 0)
+        or "Interface\\Icons\\" .. FALLBACK_ICON)
     local qc = ITEM_QUALITY_COLORS[current.quality] or ITEM_QUALITY_COLORS[1]
-    headName:SetText(source and source.name or ("Предмет " .. current.guid))
+    headName:SetText(itemName)
     headName:SetTextColor(qc.r, qc.g, qc.b)
     headSub:SetText(string.format("%s · ilvl %d · Ряды: %d из 5 · Убийств: %d",
         _G["ITEM_QUALITY" .. current.quality .. "_DESC"] or "?", current.ilvl,
         current.rowsOpen, current.kills))
 
-    -- Полоса опыта
     xpLabel:SetText(string.format("Очки таланта: |cffffd100%d|r", current.freePts))
     if current.nextNeed > 0 then
-        -- прогресс внутри текущего сегмента: от предыдущего порога до следующего
-        local prev = 0
-        -- сегмент = nextNeed - prev; prev не приходит с сервера, поэтому
-        -- показываем абсолют: kills / nextNeed
         xpRight:SetText(string.format("до следующего очка: %d / %d убийств",
             current.kills, current.nextNeed))
-        xpBar:SetMinMaxValues(prev, current.nextNeed)
+        xpBar:SetMinMaxValues(0, current.nextNeed)
         xpBar:SetValue(math.min(current.kills, current.nextNeed))
     else
         xpRight:SetText("предмет полностью прокачан")
@@ -553,7 +679,7 @@ local function Render()
         xpBar:SetValue(1)
     end
 
-    -- Узлы
+    SetTreeShown(true)
     for row = 1, 5 do
         local rowData = current.rows[row]
         local lockedLabel = rowLocked[row]
@@ -589,7 +715,6 @@ local function Render()
         end
     end
 
-    -- Итог
     local parts = {}
     for row = 1, 5 do
         local rowData = current.rows[row]
@@ -609,12 +734,65 @@ local function Render()
 end
 
 -- ---------------------------------------------------------------------------
--- Протокол
+-- Выбор слота / обновление
 -- ---------------------------------------------------------------------------
 
--- v1-ограничение сервера: ряды выше этого выбора не принимают (ROW_SOON).
--- Значение зашито и в конфиг сервера; при расширении поднять оба.
-local MAX_IMPLEMENTED_ROW = 2
+local function Refresh()
+    if selectedInv then
+        SendCmd(string.format(".itemtalent info inv %d", selectedInv))
+    end
+end
+
+SelectSlot = function(inv)
+    selectedInv = inv
+    resetMode = false
+    hint:SetText("")
+    UpdateSlotButtons()
+
+    if not GetInventoryItemLink("player", inv) then
+        RenderEmpty("Слот пуст - наденьте предмет.")
+        return
+    end
+    lastInfoAt = GetTime()
+    SendCmd(string.format(".itemtalent info inv %d", inv))
+end
+
+local function ShowPanel()
+    f:Show()
+    UpdateSlotButtons()
+    -- автоселект: прежний слот, иначе правая рука, иначе первый занятый
+    local pick = selectedInv
+    if not pick or not GetInventoryItemLink("player", pick) then
+        pick = nil
+        if GetInventoryItemLink("player", 16) then
+            pick = 16
+        else
+            for _, def in ipairs(SLOT_LIST) do
+                if GetInventoryItemLink("player", def.inv) then
+                    pick = def.inv
+                    break
+                end
+            end
+        end
+    end
+    if pick then
+        SelectSlot(pick)
+    else
+        RenderEmpty()
+    end
+end
+
+-- Автообновление раз в 10 секунд, пока панель открыта (kills растут в бою)
+f:SetScript("OnUpdate", function()
+    if current and GetTime() - lastInfoAt > 10 then
+        lastInfoAt = GetTime()
+        Refresh()
+    end
+end)
+
+-- ---------------------------------------------------------------------------
+-- Протокол
+-- ---------------------------------------------------------------------------
 
 local function ParseLine(msg)
     if msg == "ITALENT:END" then
@@ -624,13 +802,12 @@ local function ParseLine(msg)
             pending = nil
             lastInfoAt = GetTime()
             Render()
-            f:Show()
         end
         return true
     end
 
     if msg == "ITALENT:OK" then
-        hint:SetText("Готово! (в игре: звук выучивания таланта)")
+        hint:SetText("Готово!")
         PlaySound("LEVELUPSOUND")
         return true
     end
@@ -639,6 +816,9 @@ local function ParseLine(msg)
     if err then
         local text = ERR_TEXT[err] or ("Ошибка: " .. err)
         if f:IsShown() then hint:SetText(text) else Msg(text) end
+        if err == "NO_POOL" and f:IsShown() then
+            RenderEmpty("Этот предмет не участвует в системе талантов.")
+        end
         return true
     end
 
@@ -685,67 +865,40 @@ ChatFrame_AddMessageEventFilter("CHAT_MSG_SYSTEM", function(self, event, msg)
 end)
 
 -- ---------------------------------------------------------------------------
--- Открытие панели
+-- Кнопка на окне персонажа (рядом с кнопкой трансмогрификации)
 -- ---------------------------------------------------------------------------
 
-local function OpenFromBag(bag, slot)
-    local texture = GetContainerItemInfo(bag, slot)
-    local link = GetContainerItemLink(bag, slot)
-    if not link then return end
-    source = { bag = bag, slot = slot, icon = texture,
-        name = link:match("%[(.-)%]") or "?" }
-    resetMode = false
-    hint:SetText("")
-    SendCmd(string.format(".itemtalent info %d %d", bag, slot))
-end
+local charBtn = CreateFrame("Button", "ItemTalentUICharButton", CharacterFrame)
+charBtn:SetWidth(28)
+charBtn:SetHeight(28)
+-- Кнопка TransmogUI стоит на (-75, -41); наша - следующей в том же ряду
+charBtn:SetPoint("TOPRIGHT", CharacterFrame, "TOPRIGHT", -105, -41)
+charBtn:SetFrameLevel(CharacterFrame:GetFrameLevel() + 5)
+charBtn:SetNormalTexture("Interface\\Icons\\Ability_Marksmanship")
+charBtn:GetNormalTexture():SetTexCoord(0.07, 0.93, 0.07, 0.93)
+charBtn:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")
 
-local function OpenFromInv(invSlot)
-    local link = GetInventoryItemLink("player", invSlot)
-    if not link then return end
-    source = { inv = invSlot, icon = GetInventoryItemTexture("player", invSlot),
-        name = link:match("%[(.-)%]") or "?" }
-    resetMode = false
-    hint:SetText("")
-    SendCmd(string.format(".itemtalent info inv %d", invSlot))
-end
+local charBtnBorder = charBtn:CreateTexture(nil, "OVERLAY")
+charBtnBorder:SetTexture("Interface\\Buttons\\UI-Quickslot2")
+charBtnBorder:SetPoint("CENTER")
+charBtnBorder:SetWidth(50)
+charBtnBorder:SetHeight(50)
 
-local function Refresh()
-    if not source then return end
-    if source.inv then
-        SendCmd(string.format(".itemtalent info inv %d", source.inv))
+charBtn:SetScript("OnClick", function()
+    if f:IsShown() then
+        f:Hide()
     else
-        SendCmd(string.format(".itemtalent info %d %d", source.bag, source.slot))
-    end
-end
-
--- Ctrl+ПКМ: сумки (raw-замена глобального обработчика, стандартное действие
--- блокируется только для нашего сочетания)
-local origContainerClick = ContainerFrameItemButton_OnClick
-ContainerFrameItemButton_OnClick = function(self, button, ...)
-    if button == "RightButton" and IsControlKeyDown() then
-        OpenFromBag(self:GetParent():GetID(), self:GetID())
-        return
-    end
-    return origContainerClick(self, button, ...)
-end
-
--- Ctrl+ПКМ: кукла персонажа
-local origPaperDollClick = PaperDollItemSlotButton_OnClick
-PaperDollItemSlotButton_OnClick = function(self, button, ...)
-    if button == "RightButton" and IsControlKeyDown() then
-        OpenFromInv(self:GetID())
-        return
-    end
-    return origPaperDollClick(self, button, ...)
-end
-
--- Автообновление раз в 10 секунд, пока панель открыта (kills растут в бою)
-f:SetScript("OnUpdate", function(self, elapsed)
-    if current and GetTime() - lastInfoAt > 10 then
-        lastInfoAt = GetTime()
-        Refresh()
+        ShowPanel()
     end
 end)
+charBtn:SetScript("OnEnter", function(self)
+    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+    GameTooltip:SetText("Пробуждение снаряжения")
+    GameTooltip:AddLine("Таланты предметов: качество открывает ряды,", 0.8, 0.8, 0.8)
+    GameTooltip:AddLine("убийства копят очки.", 0.8, 0.8, 0.8)
+    GameTooltip:Show()
+end)
+charBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
 -- ---------------------------------------------------------------------------
 -- События / слэш
@@ -753,14 +906,27 @@ end)
 
 local ev = CreateFrame("Frame")
 ev:RegisterEvent("PLAYER_LOGIN")
-ev:SetScript("OnEvent", function()
-    ItemTalentUIDB = ItemTalentUIDB or {}
-    if ItemTalentUIDB.pos then
-        f:ClearAllPoints()
-        f:SetPoint(ItemTalentUIDB.pos.point, UIParent, ItemTalentUIDB.pos.relPoint,
-            ItemTalentUIDB.pos.x, ItemTalentUIDB.pos.y)
+ev:RegisterEvent("UNIT_INVENTORY_CHANGED")
+ev:SetScript("OnEvent", function(self, event, arg1)
+    if event == "PLAYER_LOGIN" then
+        ItemTalentUIDB = ItemTalentUIDB or {}
+        if ItemTalentUIDB.pos then
+            f:ClearAllPoints()
+            f:SetPoint(ItemTalentUIDB.pos.point, UIParent, ItemTalentUIDB.pos.relPoint,
+                ItemTalentUIDB.pos.x, ItemTalentUIDB.pos.y)
+        end
+        RenderEmpty()
+        Msg("загружен. Кнопка на окне персонажа или /itu.")
+    elseif event == "UNIT_INVENTORY_CHANGED" and arg1 == "player" and f:IsShown() then
+        UpdateSlotButtons()
+        local now = GetTime()
+        if now - invChangedAt > 1 then
+            invChangedAt = now
+            if selectedInv and GetInventoryItemLink("player", selectedInv) then
+                Refresh()
+            end
+        end
     end
-    Msg("загружен. Ctrl+ПКМ по предмету - панель талантов.")
 end)
 
 SLASH_ITEMTALENTUI1 = "/itu"
@@ -768,8 +934,11 @@ SLASH_ITEMTALENTUI2 = "/itemtalent"
 SlashCmdList["ITEMTALENTUI"] = function(arg)
     local inv = tonumber(arg)
     if inv and inv >= 1 and inv <= 19 then
-        OpenFromInv(inv)
+        if not f:IsShown() then f:Show(); UpdateSlotButtons() end
+        SelectSlot(inv)
+    elseif f:IsShown() then
+        f:Hide()
     else
-        Msg("Ctrl+ПКМ по предмету в сумке или на кукле. Либо /itu <слот 1-19>.")
+        ShowPanel()
     end
 end
