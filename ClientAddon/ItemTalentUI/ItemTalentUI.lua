@@ -1183,7 +1183,7 @@ charBtn:SetWidth(32)
 charBtn:SetHeight(32)
 charBtn:SetPoint("TOPLEFT", CharacterFrame, "TOPRIGHT", -33, -114)
 charBtn:SetFrameLevel(CharacterFrame:GetFrameLevel() + 5)
-charBtn:SetNormalTexture("Interface\\Icons\\Ability_Marksmanship")
+charBtn:SetNormalTexture("Interface\\Icons\\INV_Sword_31")
 charBtn:GetNormalTexture():SetTexCoord(0.07, 0.93, 0.07, 0.93)
 charBtn:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")
 
