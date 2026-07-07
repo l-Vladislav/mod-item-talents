@@ -923,6 +923,15 @@ local function Refresh()
     end
 end
 
+-- itemId (entry) предмета в слоте из ссылки: |Hitem:12345:...|h. Нужен, чтобы
+-- отличить сменившийся предмет - guid клиенту в 3.3.5 недоступен, а entry в
+-- ссылке есть. Разные предметы = разный entry -> кэш слота устарел.
+local function SlotItemId(inv)
+    local link = GetInventoryItemLink("player", inv)
+    if not link then return nil end
+    return tonumber(link:match("|Hitem:(%d+):"))
+end
+
 SelectSlot = function(inv)
     selectedInv = inv
     resetMode = false
@@ -935,13 +944,18 @@ SelectSlot = function(inv)
     end
 
     -- Дерево талантов из КЭША по GUID рисуем МГНОВЕННО (оно статично, меняется
-    -- только на выбор/сброс) - без задержки и мигания. Но затем ВСЕГДА
-    -- дозапрашиваем свежий блок с сервера: волатильные поля (kills, «рядом с
-    -- мастером») растут в игре, а раньше return тут держал старое значение из
-    -- кэша до перезахода. Ответ обновит только счётчики, дерево не дёрнется.
+    -- только на выбор/сброс) - без задержки и мигания. Но кэш слота (invCache)
+    -- держит ПРЕЖНИЙ предмет, пока не придёт свежий list, поэтому применяем
+    -- кэш ТОЛЬКО если entry предмета в слоте совпадает с живым - иначе на миг
+    -- показался бы прогресс старого предмета (баг смены наплечников). Затем
+    -- ВСЕГДА дозапрашиваем свежий блок: kills/мастер волатильны.
+    local liveId = SlotItemId(inv)
     local st = invCache[inv]
     local guid = st and st.guid
     local cached = guid and infoCache[guid]
+    if cached and cached.itemId ~= liveId then
+        cached = nil -- кэш слота от прежнего предмета - не рисуем, ждём сервер
+    end
     if ItemTalentUIDB and ItemTalentUIDB.debug then
         Msg(string.format("слот %d: invCache=%s guid=%s дерево=%s",
             inv, st and "да" or "НЕТ", tostring(guid), cached and "ЕСТЬ->кэш" or "нет->сервер"))
@@ -949,6 +963,8 @@ SelectSlot = function(inv)
     if cached then
         current = cached
         Render() -- мгновенно из кэша (дерево)
+    else
+        RenderEmpty("Загрузка...") -- чистим панель, чтобы не висел старый предмет
     end
     lastInfoAt = GetTime()
     SendCmd(string.format(".itemtalent info inv %d", inv)) -- свежие kills/мастер
@@ -995,6 +1011,9 @@ local function ParseLine(msg)
         if pending then
             pending.maxRow = MAX_IMPLEMENTED_ROW
             pending.at = GetTime()
+            -- entry предмета в выбранном слоте: по нему SelectSlot отличает
+            -- сменившийся предмет и не рисует чужой кэш
+            pending.itemId = SlotItemId(selectedInv or 0)
             infoCache[pending.guid] = pending -- кэш по GUID для мгновенного ре-рендера
             -- Применяем ответ, ТОЛЬКО если он для текущего выбранного слота
             -- (при быстром переключении медленный ответ по другому слоту не
