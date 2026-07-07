@@ -5,6 +5,11 @@
  * Протокол аддона (ADDON_UI.md §4), ответы SYSTEM-сообщениями с префиксом ITALENT:
  *   .itemtalent info <bag> <slot> | info inv <slot>
  *       ITALENT:HDR:<guid>:<ilvl>:<quality>:<pool>:<rowsOpen>:<nearMaster>:<kills>:<freePts>:<nextNeed>:<baseEpic>
+ *         Уровни-сегменты (решение 2026-07-07, форма протокола НЕ менялась):
+ *         kills = счётчик убийств ВНУТРИ текущего уровня (взятие уровня
+ *         обнуляет), freePts = уровень пробуждения 0..5 (state.level),
+ *         nextNeed = сегмент следующего уровня (0 = уровень 5); аддон уже
+ *         рисует "до уровня N: kills / nextNeed".
  *         baseEpic (10-е поле, фаза 2): 1 = ряд 5 доступен предмету (базовый
  *         эпик - Quality 4 и корень GA-цепочки не ниже эпика; именные
  *         предметы тоже 1), 0 = потолок 4 ряда ("недоступен для предмета")
@@ -18,10 +23,11 @@
  *   .itemtalent list -> ITALENT:ITEM:<guid>:<pool>:<quality>:<kills>:<free>:<имя> ... ITALENT:END
  *
  * GM-команды (SEC_GAMEMASTER, тестирование):
- *   .itemtalent awaken <itemGuidLow>      - все очки + выбрать слот 1 в пустых рядах
- *     (фаза 2: пробуждает и ряд 5 - у именных наборов И generic базовых
- *     эпиков; закрытые качеством/гейтом ряды отсекает TryChoose)
- *   .itemtalent setkills <itemGuidLow> <n> - выставить kills (кэш + БД)
+ *   .itemtalent awaken <itemGuidLow>      - уровень 5 (kills = 0) + выбрать
+ *     слот 1 в пустых рядах (фаза 2: пробуждает и ряд 5 - у именных наборов
+ *     И generic базовых эпиков; закрытые качеством/гейтом ряды отсекает TryChoose)
+ *   .itemtalent setkills <itemGuidLow> <n> - kills ТЕКУЩЕГО уровня (кэш + БД)
+ *   .itemtalent setlevel <itemGuidLow> <n> - уровень пробуждения 0..5, kills = 0
  *   .itemtalent reroll <itemGuidLow>      - сброс выборов и роллов, свежий ролл
  *   .itemtalent sound <soundId>           - проиграть себе звук (подбор SoundEntries)
  *
@@ -498,7 +504,7 @@ public:
                 if (error)
                     handler.PSendSysMessage("|cffff0000{}|r", ErrorText(error));
                 else
-                    handler.PSendSysMessage("|cff00ff00Ряд сброшен, очко возвращено.|r");
+                    handler.PSendSysMessage("|cff00ff00Ряд сброшен. Можно выбрать перк заново.|r");
                 ShowItem(player, creature, equipSlot);
                 break;
             }
@@ -534,9 +540,8 @@ private:
 
             ItemTalents::ItemState& state = sItemTalentsMgr->EnsureState(player, item);
             AddGossipItemFor(player, GOSSIP_ICON_CHAT,
-                Acore::StringFormat("{} - убийств: {}, уровень пробуждения: {}",
-                    item->GetTemplate()->Name1, state.kills,
-                    sItemTalentsMgr->EarnedPoints(state.kills)),
+                Acore::StringFormat("{} - уровень пробуждения: {}, убийств на уровне: {}",
+                    item->GetTemplate()->Name1, state.level, state.kills),
                 ITEM_TALENTS_GOSSIP_SENDER, MakeAction(OP_ITEM, slot));
             ++shown;
         }
@@ -568,12 +573,14 @@ private:
 
         ClearGossipMenuFor(player);
 
-        // Шапка-строка (клик просто обновляет меню)
-        uint32 const nextNeed = sItemTalentsMgr->NextPointNeed(state.kills);
-        std::string header = Acore::StringFormat("{}: убийств {}, уровень пробуждения {} из 5",
-            proto->Name1, state.kills, sItemTalentsMgr->EarnedPoints(state.kills));
+        // Шапка-строка (клик просто обновляет меню); kills - счётчик ВНУТРИ
+        // уровня, nextNeed - сегмент следующего уровня (0 = уровень 5)
+        uint32 const nextNeed = sItemTalentsMgr->NextLevelNeed(state.level);
+        std::string header = Acore::StringFormat("{}: уровень пробуждения {} из 5",
+            proto->Name1, state.level);
         if (nextNeed)
-            header += Acore::StringFormat(" (след. уровень: {} убийств)", nextNeed);
+            header += Acore::StringFormat(" (след. уровень: {} / {} убийств)",
+                state.kills, nextNeed);
         AddGossipItemFor(player, GOSSIP_ICON_CHAT, header,
             ITEM_TALENTS_GOSSIP_SENDER, MakeAction(OP_ITEM, equipSlot));
 
@@ -603,11 +610,19 @@ private:
                 AddGossipItemFor(player, GOSSIP_ICON_CHAT,
                     Acore::StringFormat("Ряд {} ({}): скоро", row, RowName(row)),
                     ITEM_TALENTS_GOSSIP_SENDER, MakeAction(OP_ITEM, equipSlot));
-            else if (sItemTalentsMgr->EarnedPoints(state.kills) < row)
-                AddGossipItemFor(player, GOSSIP_ICON_CHAT,
-                    Acore::StringFormat("Ряд {} ({}): нужен уровень пробуждения {} ({} убийств)",
-                        row, RowName(row), row, sItemTalentsMgr->GetRowThreshold(row)),
+            else if (state.level < row)
+            {
+                // Следующему уровню показываем остаток убийств; дальним
+                // рядам - только требуемый уровень (kills считаются с нуля
+                // на каждом уровне, суммы вперёд не существует)
+                std::string text = Acore::StringFormat(
+                    "Ряд {} ({}): нужен уровень пробуждения {}", row, RowName(row), row);
+                uint32 const need = sItemTalentsMgr->NextLevelNeed(state.level);
+                if (row == state.level + 1 && need > state.kills)
+                    text += Acore::StringFormat(" (осталось {} убийств)", need - state.kills);
+                AddGossipItemFor(player, GOSSIP_ICON_CHAT, text,
                     ITEM_TALENTS_GOSSIP_SENDER, MakeAction(OP_ITEM, equipSlot));
+            }
             else
                 AddGossipItemFor(player, GOSSIP_ICON_INTERACT_1,
                     Acore::StringFormat("Ряд {} ({}): выбрать перк", row, RowName(row)),
@@ -641,12 +656,17 @@ private:
 
         ClearGossipMenuFor(player);
 
-        if (sItemTalentsMgr->EarnedPoints(state.kills) < row)
-            AddGossipItemFor(player, GOSSIP_ICON_CHAT,
-                Acore::StringFormat(
-                    "Нужен уровень пробуждения {} ({} убийств этим предметом).",
-                    row, sItemTalentsMgr->GetRowThreshold(row)),
+        if (state.level < row)
+        {
+            std::string text = Acore::StringFormat("Нужен уровень пробуждения {}.", row);
+            uint32 const need = sItemTalentsMgr->NextLevelNeed(state.level);
+            if (row == state.level + 1 && need > state.kills)
+                text = Acore::StringFormat(
+                    "Нужен уровень пробуждения {} (осталось {} убийств этим предметом).",
+                    row, need - state.kills);
+            AddGossipItemFor(player, GOSSIP_ICON_CHAT, text,
                 ITEM_TALENTS_GOSSIP_SENDER, MakeAction(OP_ITEM, equipSlot));
+        }
 
         // Ряд 5 (именной И generic-проки) роллится без качества - "Обычный"
         // в подписи не пишем
@@ -702,7 +722,7 @@ private:
         ClearGossipMenuFor(player);
 
         int32 const value = sItemTalentsMgr->CalcValue(*def, proto->ItemLevel, roll.quality);
-        std::string text = Acore::StringFormat("Подтвердить: {} - {} (1 очко)", def->nameRu,
+        std::string text = Acore::StringFormat("Подтвердить: {} - {}", def->nameRu,
             PerkDesc(proto, row, def, roll.choice, value));
         if (!item->IsSoulBound())
             text += ". Внимание: предмет станет персональным!";
@@ -726,7 +746,7 @@ private:
 
         ClearGossipMenuFor(player);
         AddGossipItemFor(player, GOSSIP_ICON_BATTLE,
-            Acore::StringFormat("Подтвердить сброс ряда {} ({}). Очко вернется, убийства не сгорят.",
+            Acore::StringFormat("Подтвердить сброс ряда {} ({}). Уровень и убийства не сгорят.",
                 row, RowName(row)),
             ITEM_TALENTS_GOSSIP_SENDER, MakeAction(OP_DO_RESET, equipSlot, row));
         AddGossipItemFor(player, GOSSIP_ICON_CHAT, "Отмена",
@@ -754,6 +774,7 @@ public:
             // GM-команды тестирования
             { "awaken",   HandleAwakenCommand,   SEC_GAMEMASTER, Console::No },
             { "setkills", HandleSetKillsCommand, SEC_GAMEMASTER, Console::No },
+            { "setlevel", HandleSetLevelCommand, SEC_GAMEMASTER, Console::No },
             { "reroll",   HandleRerollCommand,   SEC_GAMEMASTER, Console::No },
             { "sound",    HandleSoundCommand,    SEC_GAMEMASTER, Console::No },
         };
@@ -786,10 +807,12 @@ private:
         uint8 const baseEpic = (sItemTalentsMgr->IsBaseEpic(proto)
             || sItemTalentsMgr->HasNamedSet(proto->ItemId)) ? 1 : 0;
 
+        // kills = счётчик внутри уровня, freePts = уровень (state.level),
+        // nextNeed = сегмент следующего уровня; форма протокола не менялась
         handler->PSendSysMessage("ITALENT:HDR:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
             item->GetGUID().GetCounter(), proto->ItemLevel, proto->Quality, *pool, rowsOpen,
-            nearMaster, state.kills, sItemTalentsMgr->EarnedPoints(state.kills),
-            sItemTalentsMgr->NextPointNeed(state.kills), baseEpic);
+            nearMaster, state.kills, state.level,
+            sItemTalentsMgr->NextLevelNeed(state.level), baseEpic);
 
         for (uint8 row = 1; row <= ItemTalents::MAX_ROWS; ++row)
         {
@@ -941,10 +964,11 @@ private:
             std::optional<char> pool = ItemTalentsMgr::GetPool(proto->Class, proto->SubClass);
             ItemTalents::ItemState& state = sItemTalentsMgr->EnsureState(player, item);
             // slot+1 = клиентский inv-слот; spent нужен аддону для строки
-            // "Пробуждён" в тултипе предмета
+            // "Пробуждён" в тултипе предмета; kills - счётчик внутри уровня,
+            // уровень - state.level (тултип-кэш аддона invCache)
             handler->PSendSysMessage("ITALENT:ITEM:{}:{}:{}:{}:{}:{}:{}:{}",
                 slot + 1, item->GetGUID().GetCounter(), *pool, proto->Quality,
-                state.kills, sItemTalentsMgr->EarnedPoints(state.kills),
+                state.kills, state.level,
                 ItemTalentsMgr::SpentPoints(state), proto->Name1);
         }
 
@@ -954,7 +978,8 @@ private:
 
     // ---- GM-команды тестирования ----
 
-    // awaken <itemGuidLow>: все очки + слот 1 в каждом пустом доступном ряду
+    // awaken <itemGuidLow>: уровень 5 (kills = 0) + слот 1 в каждом пустом
+    // доступном ряду
     static bool HandleAwakenCommand(ChatHandler* handler, uint32 itemGuidLow)
     {
         Player* player = handler->GetSession()->GetPlayer();
@@ -971,8 +996,8 @@ private:
             return true;
         }
 
-        // Максимальный кумулятивный порог = все 5 очков
-        sItemTalentsMgr->SetKills(player, item, sItemTalentsMgr->MaxPointsKills());
+        // Максимальный уровень пробуждения (счётчик убийств обнуляется)
+        sItemTalentsMgr->SetLevel(player, item, ItemTalents::MAX_ROWS);
 
         // Слот 1 в каждый пустой ряд; TryChoose сам отсечёт закрытые качеством
         // и нереализованные ряды (ROW_LOCKED/ROW_SOON игнорируем)
@@ -984,7 +1009,8 @@ private:
         return true;
     }
 
-    // setkills <itemGuidLow> <n>
+    // setkills <itemGuidLow> <n>: kills ТЕКУЩЕГО уровня (уровень не меняет;
+    // n >= сегмента следующего уровня даст уровень на ближайшем убийстве)
     static bool HandleSetKillsCommand(ChatHandler* handler, uint32 itemGuidLow, uint32 kills)
     {
         Player* player = handler->GetSession()->GetPlayer();
@@ -1002,6 +1028,35 @@ private:
         }
 
         sItemTalentsMgr->SetKills(player, item, kills);
+        handler->PSendSysMessage("ITALENT:OK");
+        SendItemInfo(handler, player, item);
+        return true;
+    }
+
+    // setlevel <itemGuidLow> <n>: уровень пробуждения 0..5, kills = 0
+    static bool HandleSetLevelCommand(ChatHandler* handler, uint32 itemGuidLow, uint8 level)
+    {
+        Player* player = handler->GetSession()->GetPlayer();
+        if (!sItemTalentsMgr->IsEnabled())
+        {
+            SendError(handler, "DISABLED");
+            return true;
+        }
+
+        if (level > ItemTalents::MAX_ROWS)
+        {
+            SendError(handler, "BAD_ARGS");
+            return true;
+        }
+
+        Item* item = GetItemByGuidLow(player, itemGuidLow);
+        if (char const* error = sItemTalentsMgr->ValidateUsableItem(player, item))
+        {
+            SendError(handler, error);
+            return true;
+        }
+
+        sItemTalentsMgr->SetLevel(player, item, level);
         handler->PSendSysMessage("ITALENT:OK");
         SendItemInfo(handler, player, item);
         return true;

@@ -189,8 +189,12 @@ namespace ItemTalents
     {
         std::array<uint8, MAX_ROWS> rows = { }; // 0 = не выбран, 1..3 = выбранный СЛОТ
         std::array<std::array<RollSlot, MAX_SLOTS>, MAX_ROWS> rolls = { };
-        uint32 kills = 0;                       // текущее значение (БД + несброшенная дельта)
-        uint32 dirtyKills = 0;                  // дельта убийств, ещё не записанная в БД
+        // Уровни пробуждения - СЕГМЕНТЫ (решение 2026-07-07): kills - счётчик
+        // убийств ВНУТРИ текущего уровня; взятие уровня ОБНУЛЯЕТ kills
+        // (излишки сгорают), level растёт до MAX_ROWS.
+        uint32 kills = 0;   // убийства в счёт СЛЕДУЮЩЕГО уровня
+        uint8 level = 0;    // уровень пробуждения 0..5 (источник - БД, не kills)
+        bool dirty = false; // kills/level изменены и ещё не записаны в БД
     };
 
     // Зарегистрированный прок именного перка (пока предмет надет)
@@ -276,11 +280,11 @@ public:
     }
     [[nodiscard]] ItemTalents::NamedDef const* GetNamedDef(uint32 itemEntry, uint8 choice) const;
     // Гейт ряда 5 (фаза 2, PERKS "Ряд 5"): БАЗОВЫЙ эпик = Quality 4 И предмет
-    // не является GA-копией с корнем ниже эпика. Если entry есть в цепочке
-    // item_upgrade_chain (mod-gear-ascension) - идём по prev_entry до корня,
-    // корень Quality 4 -> базовый эпик; вне цепочки Quality 4 -> базовый эпик.
-    // Кэш по entry; наличие GA-таблицы гейтится через information_schema
-    // (модуль GA может отсутствовать - тогда все эпики базовые).
+    // не GA-копия (нет в item_upgrade_chain.next_entry - эпик-базы GA не
+    // апгрейдит). Все GA-копии предзагружены в _gaCopyEntries при старте,
+    // проверка чисто в памяти; наличие GA-таблицы гейтится через
+    // information_schema (модуль GA может отсутствовать - тогда все эпики
+    // базовые).
     [[nodiscard]] bool IsBaseEpic(ItemTemplate const* proto) const;
     // Ряды, открытые предмету: качество + ряд 5 у именных наборов и БАЗОВЫХ
     // эпиков уже на эпике (решение 2026-07-06, PERKS "Ряд 5"). Не-базовые
@@ -315,25 +319,28 @@ public:
     void TransferItem(ObjectGuid::LowType oldItemGuid, ObjectGuid::LowType newItemGuid,
         Player* player);
 
-    // ---- очки ----
-    [[nodiscard]] uint32 EarnedPoints(uint32 kills) const; // = уровень пробуждения 0..5
-    // Кумулятивный порог убийств для уровня/ряда row (0, если ряда нет в конфиге)
-    [[nodiscard]] uint32 GetRowThreshold(uint8 row) const;
+    // ---- уровни пробуждения (сегменты, решение 2026-07-07) ----
+    // Источник уровня - state.level (колонка item_talents.level), НЕ kills.
+    // Сегмент убийств за уровень level 1..5 (0, если уровня нет в конфиге)
+    [[nodiscard]] uint32 GetLevelSegment(uint8 level) const;
+    // сегмент СЛЕДУЮЩЕГО уровня (нужно kills для level + 1); 0 = уровень 5
+    [[nodiscard]] uint32 NextLevelNeed(uint8 level) const;
     static uint32 SpentPoints(ItemTalents::ItemState const& state);
-    [[nodiscard]] uint32 FreePoints(ItemTalents::ItemState const& state) const;
-    // кумулятивный порог следующего очка; 0 = все очки уже заработаны
-    [[nodiscard]] uint32 NextPointNeed(uint32 kills) const;
-    // порог последнего очка (все 5 очков); 0 - пороги не настроены
-    [[nodiscard]] uint32 MaxPointsKills() const
-    {
-        return _cumThresholds.empty() ? 0 : _cumThresholds.back();
-    }
 
     // ---- опыт предмета ----
-    void AddKill(Player* player);   // +1 каждому надетому подходящему предмету (in-memory)
-    void FlushKills(Player* player); // один batched INSERT ... ON DUPLICATE KEY UPDATE
-    // GM/тест: выставить kills предмета (кэш + синхронный UPDATE в БД)
+    // +1 каждому надетому подходящему предмету (in-memory); при kills >=
+    // сегмент(level+1): kills = 0, ++level (излишки сгорают) + немедленная
+    // запись этого предмета в БД (редкое событие, надёжность)
+    void AddKill(Player* player);
+    // один batched INSERT ... ON DUPLICATE KEY UPDATE с АБСОЛЮТНЫМИ kills и
+    // level (не дельтой: сброс kills на уровне ломает дельта-модель; гонок
+    // нет - kills предмета меняет только его владелец онлайн)
+    void FlushKills(Player* player);
+    // GM/тест: выставить kills ТЕКУЩЕГО уровня (кэш + синхронный UPDATE в БД);
+    // уровень не меняет
     void SetKills(Player* player, Item* item, uint32 kills);
+    // GM/тест: выставить уровень пробуждения (kills = 0, кэш + синхронный UPDATE)
+    void SetLevel(Player* player, Item* item, uint8 level);
     // GM/тест: снять применённые таланты, обнулить выборы и роллы, зароллить заново
     void RerollItem(Player* player, Item* item);
 
@@ -470,7 +477,9 @@ private:
     uint8 _maxImplementedRow = 4;
     float _masterRange = 10.0f;
     uint32 _eliteMultiplier = 1;        // задел (DESIGN §2 "Опыт предмета"), в v1 не используется
-    std::vector<uint32> _cumThresholds; // кумулятивные пороги очков (50,200,600,1600,4100)
+    // Сегменты убийств ЗА уровень 1..5 (50,150,400,1000,2500) - НЕ кумулятивные
+    // (решение 2026-07-07): взятие уровня обнуляет счётчик kills предмета
+    std::vector<uint32> _levelSegments;
     std::vector<uint32> _masterEntries;
     // качество ролла: веса выпадения и множители значения (индекс = quality 0..2)
     std::array<double, ItemTalents::NUM_QUALITIES> _qualityChances = { 70.0, 25.0, 5.0 };
@@ -511,11 +520,13 @@ private:
     std::unordered_map<uint32, ItemTalents::ProcDef> _procs; // triggerSpell -> параметры
     std::vector<ItemTalents::Phantom> _phantoms;             // активные фантомы
     bool _inProc = false; // ре-энтри гард: наш каст не порождает новые проки
-    // Кэш гейта базовых эпиков: entry -> bool; статус GA-таблицы
-    // item_upgrade_chain (0 = не проверяли, 1 = есть, -1 = нет). mutable -
-    // IsBaseEpic зовётся из const-методов (IsFullyAwakened и пр.)
-    mutable std::unordered_map<uint32, bool> _baseEpicCache;
-    mutable int8 _gaTableStatus = 0;
+    // Гейт базовых эпиков: множество ВСЕХ GA-копий (next_entry из
+    // item_upgrade_chain), предзагружается целиком в LoadDefinitions одним
+    // запросом - IsBaseEpic на горячих путях (тултипы, экипировка, протокол
+    // аддона) в БД не ходит. Таблица статична в аптайме (пишется генераторами
+    // GA офлайн). Статус: 1 = загружено, -1 = таблицы нет (все эпики базовые).
+    std::unordered_set<uint32> _gaCopyEntries;
+    int8 _gaTableStatus = 0;
 
     // Ручные диапазоны entry для ряда 5 (конфиг, стиль ahbot); deny сильнее
     static bool EntryInRanges(std::vector<std::pair<uint32, uint32>> const& ranges, uint32 entry);

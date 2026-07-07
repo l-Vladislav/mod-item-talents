@@ -46,8 +46,9 @@
   A–H x ряды x choice 1..N (до 15); значения
   `ceil(ceil(base + per_ilvl * ItemLevel) * qualityMult)`).
   Баланс тюнится SQL-ом без пересборки.
-- `acore_characters.item_talents` — выборы (rowN = слот 1..3) и kills по
-  item_guid.
+- `acore_characters.item_talents` — выборы (rowN = слот 1..3), уровень
+  пробуждения (level 0..5) и kills ВНУТРИ текущего уровня по item_guid
+  (пороги - сегменты за уровень, взятие уровня обнуляет счётчик).
 - `acore_characters.item_talent_rolls` — роллы слотов: (item_guid, row,
   slot 1..3) -> (choice, quality 0..2).
 

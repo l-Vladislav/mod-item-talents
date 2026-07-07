@@ -86,6 +86,13 @@ namespace
             "SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() "
             "AND table_name = '{}' AND column_name = '{}' LIMIT 1", table, column));
     }
+
+    bool CharColumnExists(char const* table, char const* column)
+    {
+        return static_cast<bool>(CharacterDatabase.Query(
+            "SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() "
+            "AND table_name = '{}' AND column_name = '{}' LIMIT 1", table, column));
+    }
 }
 
 ItemTalentsMgr* ItemTalentsMgr::instance()
@@ -102,21 +109,19 @@ void ItemTalentsMgr::LoadConfig()
     _eliteMultiplier = sConfigMgr->GetOption<uint32>("ItemTalents.EliteMultiplier", 1);
     _ignoreBots = sConfigMgr->GetOption<bool>("ItemTalents.IgnoreBots", true);
 
-    // Сегменты убийств за 1..5-е очко -> кумулятивные пороги (50,200,600,1600,4100)
-    _cumThresholds.clear();
+    // Сегменты убийств ЗА уровень 1..5 КАК ЕСТЬ (решение 2026-07-07, больше
+    // НЕ кумулятивные): уровень 1 = 50 убийств, счётчик обнуляется,
+    // уровень 2 = ещё 150, и т.д.
+    _levelSegments.clear();
     std::string const thresholds =
         sConfigMgr->GetOption<std::string>("ItemTalents.PointThresholds", "50,150,400,1000,2500");
-    uint32 cumulative = 0;
     for (std::string_view token : Acore::Tokenize(thresholds, ',', false))
         if (Optional<uint32> segment = Acore::StringTo<uint32>(token))
-        {
-            cumulative += *segment;
-            _cumThresholds.push_back(cumulative);
-        }
+            _levelSegments.push_back(*segment);
 
-    if (_cumThresholds.size() != MAX_ROWS)
+    if (_levelSegments.size() != MAX_ROWS)
         LOG_WARN("module", "mod-item-talents: ItemTalents.PointThresholds has {} valid segments, "
-            "expected {}. Points capped accordingly.", _cumThresholds.size(), uint32(MAX_ROWS));
+            "expected {}. Levels capped accordingly.", _levelSegments.size(), uint32(MAX_ROWS));
 
     _masterEntries.clear();
     std::string const masters = sConfigMgr->GetOption<std::string>("ItemTalents.MasterEntries",
@@ -147,7 +152,6 @@ void ItemTalentsMgr::LoadConfig()
         _row5Allow);
     parseRanges(sConfigMgr->GetOption<std::string>("ItemTalents.Row5.DenyEntryRanges", ""),
         _row5Deny);
-    _baseEpicCache.clear(); // конфиг мог поменять вердикты
 
     // Качество ролла: веса выпадения (Обычный/Отличный/Совершенный) и
     // множители значения перка. Кол-во != 3 -> дефолты.
@@ -277,6 +281,17 @@ void ItemTalentsMgr::LoadDefinitions()
         return;
     }
 
+    // Колонка level (уровни-сегменты, решение 2026-07-07): без неё бинарник
+    // трактовал бы накопительные kills как счётчик внутри уровня - жёсткий
+    // гейт вместо тихой порчи данных.
+    if (!CharColumnExists("item_talents", "level"))
+    {
+        LOG_WARN("module", "mod-item-talents: item_talents.level is missing; module "
+            "disabled until pending_db_characters/mod_item_talents_level.sql is applied.");
+        _enable = false;
+        return;
+    }
+
     if (!CharTableExists("item_talent_rolls"))
     {
         LOG_WARN("module", "mod-item-talents: acore_characters.item_talent_rolls is missing; "
@@ -383,9 +398,27 @@ void ItemTalentsMgr::LoadDefinitions()
             "pending_db_world/mod_item_talents_aura_spells.sql and restart.",
             ItemTalents::SPELL_MOVE_SPEED_R1);
 
-    // Ряд 5: параметры проков (item_talent_procs) + сброс кэша базовых эпиков
-    _baseEpicCache.clear();
-    _gaTableStatus = 0;
+    // Гейт базовых эпиков: все GA-копии одним запросом в память (~160k uint32,
+    // единицы МБ) - дальше IsBaseEpic в БД не ходит. Известная грабля: SELECT
+    // из несуществующей таблицы абортит worldserver - гейт через
+    // information_schema.
+    _gaCopyEntries.clear();
+    _gaTableStatus = WorldTableExists("item_upgrade_chain") ? 1 : -1;
+    if (_gaTableStatus < 0)
+        LOG_INFO("module", "mod-item-talents: item_upgrade_chain is missing "
+            "(mod-gear-ascension not installed?) - all epics count as base epics.");
+    else if (QueryResult copies = WorldDatabase.Query(
+        "SELECT DISTINCT next_entry FROM item_upgrade_chain"))
+    {
+        do
+            _gaCopyEntries.insert(copies->Fetch()[0].Get<uint32>());
+        while (copies->NextRow());
+
+        LOG_INFO("module", "mod-item-talents: cached {} GA copy entries for the "
+            "base-epic gate.", _gaCopyEntries.size());
+    }
+
+    // Ряд 5: параметры проков (item_talent_procs)
     LoadProcs();
 
     // Спеллы ряда 5 (триггеры + видимые) - тоже spell_dbc, нужен рестарт
@@ -517,36 +550,12 @@ bool ItemTalentsMgr::IsBaseEpic(ItemTemplate const* proto) const
     if (proto->Quality != ITEM_QUALITY_EPIC)
         return false;
 
-    auto cached = _baseEpicCache.find(proto->ItemId);
-    if (cached != _baseEpicCache.end())
-        return cached->second;
-
-    // Без GA-таблицы (модуль mod-gear-ascension отсутствует) цепочек нет:
-    // любой эпик - базовый. Известная грабля: SELECT из несуществующей
-    // таблицы абортит worldserver - гейт через information_schema.
-    if (!_gaTableStatus)
-    {
-        _gaTableStatus = WorldTableExists("item_upgrade_chain") ? 1 : -1;
-        if (_gaTableStatus < 0)
-            LOG_INFO("module", "mod-item-talents: item_upgrade_chain is missing "
-                "(mod-gear-ascension not installed?) - all epics count as base epics.");
-    }
-
-    bool baseEpic = true;
-    if (_gaTableStatus > 0)
-    {
-        // Цепочка ключуется ИСХОДНЫМ предметом (entry -> next_entry):
-        // вершина (эпик-копия) собственной строки НЕ имеет, поэтому ищем
-        // предмет в колонке next_entry - нашёлся значит это GA-копия,
-        // а копия базовым эпиком не бывает (эпик-базы GA не апгрейдит).
-        QueryResult result = WorldDatabase.Query(
-            "SELECT 1 FROM item_upgrade_chain WHERE next_entry = {} LIMIT 1",
-            proto->ItemId);
-        baseEpic = !result;
-    }
-
-    _baseEpicCache[proto->ItemId] = baseEpic;
-    return baseEpic;
+    // Цепочка ключуется ИСХОДНЫМ предметом (entry -> next_entry): вершина
+    // (эпик-копия) собственной строки НЕ имеет, поэтому GA-копию узнаём по
+    // колонке next_entry - нашёлся значит копия, а копия базовым эпиком не
+    // бывает (эпик-базы GA не апгрейдит). Все копии предзагружены в
+    // LoadDefinitions; без GA-таблицы цепочек нет - любой эпик базовый.
+    return !_gaCopyEntries.contains(proto->ItemId);
 }
 
 bool ItemTalentsMgr::EntryInRanges(std::vector<std::pair<uint32, uint32>> const& ranges,
@@ -662,7 +671,7 @@ void ItemTalentsMgr::LoadPlayerState(Player* player)
     OwnerStates& states = _states[ownerGuid]; // помечает владельца загруженным даже при 0 строк
 
     QueryResult result = CharacterDatabase.Query(
-        "SELECT item_guid, row1, row2, row3, row4, row5, kills FROM item_talents "
+        "SELECT item_guid, row1, row2, row3, row4, row5, kills, level FROM item_talents "
         "WHERE owner_guid = {}", ownerGuid);
     if (!result)
         return;
@@ -674,7 +683,8 @@ void ItemTalentsMgr::LoadPlayerState(Player* player)
         for (uint8 i = 0; i < MAX_ROWS; ++i)
             state.rows[i] = fields[1 + i].Get<uint8>();
         state.kills = fields[6].Get<uint32>();
-        state.dirtyKills = 0;
+        state.level = std::min<uint8>(fields[7].Get<uint8>(), MAX_ROWS);
+        state.dirty = false;
     } while (result->NextRow());
 
     // Роллы тех же предметов вторым запросом. JOIN на item_talents: владельца
@@ -737,13 +747,14 @@ ItemState& ItemTalentsMgr::EnsureState(Player* player, Item* item)
         // (owner_guid в БД обновляется только при INSERT) - точечный SELECT.
         ItemState state;
         if (QueryResult result = CharacterDatabase.Query(
-            "SELECT row1, row2, row3, row4, row5, kills FROM item_talents WHERE item_guid = {}",
-            itemGuid))
+            "SELECT row1, row2, row3, row4, row5, kills, level FROM item_talents "
+            "WHERE item_guid = {}", itemGuid))
         {
             Field* fields = result->Fetch();
             for (uint8 i = 0; i < MAX_ROWS; ++i)
                 state.rows[i] = fields[i].Get<uint8>();
             state.kills = fields[5].Get<uint32>();
+            state.level = std::min<uint8>(fields[6].Get<uint8>(), MAX_ROWS);
         }
 
         if (QueryResult rolls = CharacterDatabase.Query(
@@ -904,8 +915,8 @@ void ItemTalentsMgr::TransferItem(ObjectGuid::LowType oldItemGuid,
         "UPDATE item_talent_rolls SET item_guid = {} WHERE item_guid = {}",
         newItemGuid, oldItemGuid);
 
-    // Кэш: перекладываем состояние (включая несброшенные dirtyKills - их
-    // допишет FlushKills уже под новым GUID) на новый ключ у владельца.
+    // Кэш: перекладываем состояние (включая несохранённые kills/level, флаг
+    // dirty - их допишет FlushKills уже под новым GUID) на новый ключ у владельца.
     if (!player)
         return;
 
@@ -927,17 +938,18 @@ uint8 ItemTalentsMgr::RollQuality() const
 }
 
 // ---------------------------------------------------------------------------
-// Очки
+// Уровни пробуждения (сегменты, решение 2026-07-07)
 // ---------------------------------------------------------------------------
 
-uint32 ItemTalentsMgr::EarnedPoints(uint32 kills) const
+uint32 ItemTalentsMgr::GetLevelSegment(uint8 level) const
 {
-    uint32 earned = 0;
-    for (uint32 threshold : _cumThresholds)
-        if (kills >= threshold)
-            ++earned;
+    return (level >= 1 && level <= _levelSegments.size()) ? _levelSegments[level - 1] : 0;
+}
 
-    return earned;
+uint32 ItemTalentsMgr::NextLevelNeed(uint8 level) const
+{
+    // 0 = уровень 5 взят (или сегмент не настроен - уровень недостижим)
+    return level >= MAX_ROWS ? 0 : GetLevelSegment(level + 1);
 }
 
 uint32 ItemTalentsMgr::SpentPoints(ItemState const& state)
@@ -948,27 +960,6 @@ uint32 ItemTalentsMgr::SpentPoints(ItemState const& state)
             ++spent;
 
     return spent;
-}
-
-uint32 ItemTalentsMgr::FreePoints(ItemState const& state) const
-{
-    uint32 const earned = EarnedPoints(state.kills);
-    uint32 const spent = SpentPoints(state);
-    return earned > spent ? earned - spent : 0;
-}
-
-uint32 ItemTalentsMgr::GetRowThreshold(uint8 row) const
-{
-    return (row >= 1 && row <= _cumThresholds.size()) ? _cumThresholds[row - 1] : 0;
-}
-
-uint32 ItemTalentsMgr::NextPointNeed(uint32 kills) const
-{
-    for (uint32 threshold : _cumThresholds)
-        if (kills < threshold)
-            return threshold;
-
-    return 0; // все очки заработаны
 }
 
 // ---------------------------------------------------------------------------
@@ -989,7 +980,27 @@ void ItemTalentsMgr::AddKill(Player* player)
         // _eliteMultiplier - задел на будущее (DESIGN: пока всегда +1)
         ItemState& state = EnsureState(player, item);
         ++state.kills;
-        ++state.dirtyKills;
+        state.dirty = true;
+
+        // Взятие уровня (решение 2026-07-07): счётчик обнуляется, излишки
+        // сгорают. need = 0 - уровень 5 взят или сегмент не настроен.
+        uint32 const need = NextLevelNeed(state.level);
+        if (!need || state.kills < need)
+            continue;
+
+        state.kills = 0;
+        ++state.level;
+        state.dirty = false;
+
+        // Уровень фиксируем в БД сразу (<= 5 событий за жизнь предмета -
+        // надёжнее батча на сохранении, производительность не страдает).
+        // Async безопасен: и этот INSERT, и FlushKills пишут АБСОЛЮТНЫЕ
+        // значения из кэша - порядок применения не важен.
+        CharacterDatabase.Execute(
+            "INSERT INTO item_talents (item_guid, owner_guid, kills, level) "
+            "VALUES ({}, {}, 0, {}) ON DUPLICATE KEY UPDATE kills = VALUES(kills), "
+            "level = VALUES(level), owner_guid = VALUES(owner_guid)",
+            item->GetGUID().GetCounter(), player->GetGUID().GetCounter(), state.level);
     }
 }
 
@@ -1006,35 +1017,55 @@ void ItemTalentsMgr::FlushKills(Player* player)
     std::string values;
     for (auto& [itemGuid, state] : ownerItr->second)
     {
-        if (!state.dirtyKills)
+        if (!state.dirty)
             continue;
 
         if (!values.empty())
             values += ',';
-        values += Acore::StringFormat("({},{},{})", itemGuid, ownerGuid, state.dirtyKills);
-        state.dirtyKills = 0;
+        values += Acore::StringFormat("({},{},{},{})", itemGuid, ownerGuid, state.kills,
+            state.level);
+        state.dirty = false;
     }
 
     if (values.empty())
         return;
 
-    // owner_guid обновляем тоже: предмет могли передать до привязки
+    // АБСОЛЮТНЫЕ значения (не дельта: сброс kills при взятии уровня ломает
+    // модель kills = kills + delta; гонок нет - kills предмета меняет только
+    // его владелец онлайн). owner_guid обновляем тоже: предмет могли
+    // передать до привязки.
     CharacterDatabase.Execute(
-        "INSERT INTO item_talents (item_guid, owner_guid, kills) VALUES " + values +
-        " ON DUPLICATE KEY UPDATE kills = kills + VALUES(kills), "
+        "INSERT INTO item_talents (item_guid, owner_guid, kills, level) VALUES " + values +
+        " ON DUPLICATE KEY UPDATE kills = VALUES(kills), level = VALUES(level), "
         "owner_guid = VALUES(owner_guid)");
 }
 
 void ItemTalentsMgr::SetKills(Player* player, Item* item, uint32 kills)
 {
+    // kills ТЕКУЩЕГО уровня; уровень не трогаем (для уровня - SetLevel)
     ItemState& state = EnsureState(player, item);
     state.kills = kills;
-    state.dirtyKills = 0; // старая дельта поглощается выставленным значением
+    state.dirty = false; // выставленное значение уходит в БД сразу
 
     CharacterDatabase.DirectExecute(
-        "INSERT INTO item_talents (item_guid, owner_guid, kills) VALUES ({}, {}, {}) "
-        "ON DUPLICATE KEY UPDATE kills = {}, owner_guid = VALUES(owner_guid)",
-        item->GetGUID().GetCounter(), player->GetGUID().GetCounter(), kills, kills);
+        "INSERT INTO item_talents (item_guid, owner_guid, kills, level) VALUES ({}, {}, {}, {}) "
+        "ON DUPLICATE KEY UPDATE kills = VALUES(kills), level = VALUES(level), "
+        "owner_guid = VALUES(owner_guid)",
+        item->GetGUID().GetCounter(), player->GetGUID().GetCounter(), kills, state.level);
+}
+
+void ItemTalentsMgr::SetLevel(Player* player, Item* item, uint8 level)
+{
+    ItemState& state = EnsureState(player, item);
+    state.level = std::min<uint8>(level, MAX_ROWS);
+    state.kills = 0; // счёт нового уровня - с нуля
+    state.dirty = false;
+
+    CharacterDatabase.DirectExecute(
+        "INSERT INTO item_talents (item_guid, owner_guid, kills, level) VALUES ({}, {}, 0, {}) "
+        "ON DUPLICATE KEY UPDATE kills = VALUES(kills), level = VALUES(level), "
+        "owner_guid = VALUES(owner_guid)",
+        item->GetGUID().GetCounter(), player->GetGUID().GetCounter(), state.level);
 }
 
 void ItemTalentsMgr::RerollItem(Player* player, Item* item)
@@ -1720,15 +1751,17 @@ void ItemTalentsMgr::SaveChoice(Player* player, Item* item, uint8 row, uint8 slo
     ItemState& state = EnsureState(player, item);
     state.rows[row - 1] = slot;
 
-    // kills в БД = текущее значение минус несброшенная дельта (её допишет FlushKills)
-    uint32 const dbKills = state.kills - state.dirtyKills;
+    // kills/level - АБСОЛЮТНЫЕ значения кэша (флаш тоже абсолютный),
+    // заодно фиксируем несохранённый прогресс этого предмета
     CharacterDatabase.DirectExecute(
-        "INSERT INTO item_talents (item_guid, owner_guid, row1, row2, row3, row4, row5, kills) "
-        "VALUES ({}, {}, {}, {}, {}, {}, {}, {}) ON DUPLICATE KEY UPDATE row{} = {}, "
+        "INSERT INTO item_talents (item_guid, owner_guid, row1, row2, row3, row4, row5, "
+        "kills, level) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}) "
+        "ON DUPLICATE KEY UPDATE row{} = {}, kills = VALUES(kills), level = VALUES(level), "
         "owner_guid = VALUES(owner_guid)",
         item->GetGUID().GetCounter(), player->GetGUID().GetCounter(),
         state.rows[0], state.rows[1], state.rows[2], state.rows[3], state.rows[4],
-        dbKills, row, slot);
+        state.kills, state.level, row, slot);
+    state.dirty = false;
 }
 
 void ItemTalentsMgr::ResetChoice(Player* player, Item* item, uint8 row)
@@ -1790,9 +1823,10 @@ char const* ItemTalentsMgr::TryChoose(Player* player, Item* item, uint8 row, uin
     if (state.rows[row - 1])
         return "ALREADY_CHOSEN";
 
-    // Уровни пробуждения (решение 2026-07-06, заменило общие очки):
-    // ряд N доступен только с уровня N (kills >= N-й кумулятивный порог)
-    if (EarnedPoints(state.kills) < row)
+    // Уровни пробуждения (решение 2026-07-06, заменило общие очки; с
+    // 2026-07-07 уровень хранится в state.level - сегменты, не кумулятив):
+    // ряд N доступен только с уровня N
+    if (state.level < row)
         return "NO_POINTS";
 
     // Госсип у мастера пропускает проверку радиуса - игрок и так у НПЦ

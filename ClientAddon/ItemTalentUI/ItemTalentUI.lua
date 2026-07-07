@@ -1076,21 +1076,22 @@ end)
 -- Кнопка на окне персонажа (рядом с кнопкой трансмогрификации)
 -- ---------------------------------------------------------------------------
 
+-- Боковая вкладка на правом ребре окна персонажа (стиль вкладок книги
+-- заклинаний). Вкладка TransmogUI стоит выше на y=-65 — держать отступы в паре.
 local charBtn = CreateFrame("Button", "ItemTalentUICharButton", CharacterFrame)
-charBtn:SetWidth(28)
-charBtn:SetHeight(28)
--- Слева окна персонажа (справа заняты кнопки TransmogUI и других аддонов)
-charBtn:SetPoint("TOPLEFT", CharacterFrame, "TOPLEFT", 75, -41)
+charBtn:SetWidth(32)
+charBtn:SetHeight(32)
+charBtn:SetPoint("TOPLEFT", CharacterFrame, "TOPRIGHT", -33, -114)
 charBtn:SetFrameLevel(CharacterFrame:GetFrameLevel() + 5)
 charBtn:SetNormalTexture("Interface\\Icons\\Ability_Marksmanship")
 charBtn:GetNormalTexture():SetTexCoord(0.07, 0.93, 0.07, 0.93)
 charBtn:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")
 
-local charBtnBorder = charBtn:CreateTexture(nil, "OVERLAY")
-charBtnBorder:SetTexture("Interface\\Buttons\\UI-Quickslot2")
-charBtnBorder:SetPoint("CENTER")
-charBtnBorder:SetWidth(50)
-charBtnBorder:SetHeight(50)
+local charBtnBg = charBtn:CreateTexture(nil, "BACKGROUND")
+charBtnBg:SetTexture("Interface\\SpellBook\\SpellBook-SkillLineTab")
+charBtnBg:SetWidth(64)
+charBtnBg:SetHeight(64)
+charBtnBg:SetPoint("TOPLEFT", charBtn, "TOPLEFT", -3, 11)
 
 charBtn:SetScript("OnClick", function()
     if f:IsShown() then
