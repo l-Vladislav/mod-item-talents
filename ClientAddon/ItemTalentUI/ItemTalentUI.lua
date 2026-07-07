@@ -159,6 +159,7 @@ local listAt = nil       -- время отложенного запроса lis
 local slotButtons = {}   -- [inv] = button
 local nodes = {}         -- [row][choice] = button
 local rowLabels = {}     -- [row] = FontString подписи ряда
+local rowNotes = {}      -- [row] = FontString "уровень N" справа от ряда
 local wires = {}         -- пул текстур-сегментов пути
 
 local function Msg(text)
@@ -518,7 +519,9 @@ local function NodeOnEnter(self)
         if row == 5 and current.baseEpic == 0 then
             GameTooltip:AddLine("Недоступен: предмет не эпический по происхождению", 0.8, 0.25, 0.25)
         elseif row > current.rowsOpen then
-            GameTooltip:AddLine("Закрыто: не хватает качества предмета", 0.8, 0.25, 0.25)
+            GameTooltip:AddLine(string.format(
+                "Откроется на уровне пробуждения %d - нужно качество предмета выше", row),
+                0.8, 0.25, 0.25)
         elseif row > current.maxRow then
             GameTooltip:AddLine("Откроется в следующем обновлении", 0.8, 0.66, 0.29)
         else
@@ -677,6 +680,12 @@ for row = 1, 5 do
     label:SetTextColor(meta.r, meta.g, meta.b)
     rowLabels[row] = label
 
+    local note = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    note:SetPoint("LEFT", f, "TOPLEFT", 470, y)
+    note:SetTextColor(0.55, 0.57, 0.63)
+    note:Hide()
+    rowNotes[row] = note
+
     nodes[row] = {}
     for choice = 1, 3 do
         nodes[row][choice] = CreateNode(row, choice)
@@ -686,6 +695,7 @@ end
 local function SetTreeShown(shown)
     for row = 1, 5 do
         if shown then rowLabels[row]:Show() else rowLabels[row]:Hide() end
+        if not shown then rowNotes[row]:Hide() end
         for choice = 1, 3 do
             if shown then
                 nodes[row][choice]:Show()
@@ -796,15 +806,22 @@ local function Render()
 
     SetTreeShown(true)
 
-    -- Ряды, не открытые качеством, НЕ показываем вовсе (решение 2026-07-06):
-    -- белый предмет видит только "Заточку", зелёный - два ряда и т.д.
-    -- rowsOpen уже учитывает и правило базовых эпиков для ряда 5.
+    -- Закрытые ряды показываем с замками и подписью уровня пробуждения
+    -- (решение 2026-07-07); скрыт только ряд 5 у предметов, не эпических
+    -- по происхождению - он недостижим в принципе.
     for row = 1, 5 do
-        if row > current.rowsOpen then
-            rowLabels[row]:Hide()
+        local note = rowNotes[row]
+        if row == 5 and current.baseEpic == 0 then
+            rowLabels[5]:Hide()
+            note:Hide()
             for choice = 1, 3 do
-                nodes[row][choice]:Hide()
+                nodes[5][choice]:Hide()
             end
+        elseif current.rows[row].chosen == 0 and (current.level or 0) < row then
+            note:SetText(string.format("уровень %d", row))
+            note:Show()
+        else
+            note:Hide()
         end
     end
 
