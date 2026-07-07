@@ -47,6 +47,8 @@
 #include "CommandScript.h"
 #include "Creature.h"
 #include "GossipDef.h"
+#include "Group.h"
+#include "GroupReference.h"
 #include "Item.h"
 #include "ItemTalentsMgr.h"
 #include "ItemTemplate.h"
@@ -216,25 +218,54 @@ public:
         sItemTalentsMgr->LoadPlayerState(player);
     }
 
-    void OnPlayerCreatureKill(Player* killer, Creature* killed) override
+    // Опыт предмета засчитываем как обычный XP-кредит: ВСЕМ реальным игрокам
+    // группы в радиусе награды, а не только добившему. В группе добить может
+    // бот или другой участник - иначе у остальных убийства не считаются
+    // (репорт 2026-07-07). Хук зовётся один раз за килл (для добившего), но
+    // добивший может быть ботом - поэтому идём от его группы, а не от него.
+    static void CreditKill(Player* killer, Creature* killed)
     {
         if (!sItemTalentsMgr->IsEnabled() || !killer || !killed)
             return;
 
-        // Плейерботы не копят опыт предметов (ItemTalents.IgnoreBots)
-        if (sItemTalentsMgr->ShouldIgnorePlayer(killer))
+        Group* group = killer->GetGroup();
+        if (!group)
+        {
+            // Соло: только сам добивший, если реальный игрок и цель даёт опыт/честь
+            if (sItemTalentsMgr->ShouldIgnorePlayer(killer)
+                || !killer->isHonorOrXPTarget(killed))
+                return;
+            sItemTalentsMgr->AddKill(killer);
+            sItemTalentsMgr->OnKillProcs(killer);
+            sItemTalentsMgr->OnKillSoundChance(killer);
             return;
+        }
 
-        // Только убийства, приносящие честь/опыт: не серые, не криттеры,
-        // не питомцы/тотемы (PvP-убийства сюда не попадают вовсе).
-        if (!killer->isHonorOrXPTarget(killed))
-            return;
+        for (GroupReference* itr = group->GetFirstMember(); itr; itr = itr->next())
+        {
+            Player* member = itr->GetSource();
+            if (!member || sItemTalentsMgr->ShouldIgnorePlayer(member)) // боты вне системы
+                continue;
+            if (!member->IsInWorld() || !member->IsAtGroupRewardDistance(killed))
+                continue;
+            if (!member->isHonorOrXPTarget(killed))
+                continue;
+            sItemTalentsMgr->AddKill(member);
+            sItemTalentsMgr->OnKillProcs(member);       // именной прок JORDAN_COIN
+            sItemTalentsMgr->OnKillSoundChance(member); // звук пробуждённого оружия
+        }
+    }
 
-        sItemTalentsMgr->AddKill(killer);
-        // Именной прок JORDAN_COIN (шанс/ICD внутри)
-        sItemTalentsMgr->OnKillProcs(killer);
-        // v1: пробуждённое оружие в основной руке иногда "подаёт голос"
-        sItemTalentsMgr->OnKillSoundChance(killer);
+    void OnPlayerCreatureKill(Player* killer, Creature* killed) override
+    {
+        CreditKill(killer, killed);
+    }
+
+    // Пет/тотем-добивание (охотник/варлок/ДК): ядро НЕ зовёт OnPlayerCreatureKill,
+    // только этот хук - иначе киллы петом (в т.ч. в группе) не считались.
+    void OnPlayerCreatureKilledByPet(Player* petOwner, Creature* killed) override
+    {
+        CreditKill(petOwner, killed);
     }
 
     void OnPlayerSave(Player* player) override
@@ -262,10 +293,14 @@ public:
     }
 
     // DURA_SAVE: N% событий износа предмета с перком пропускается
-    void OnPlayerDurabilityPointsLoss(Player* player, Item* item, int32& points) override
-    {
-        sItemTalentsMgr->HandleDurabilityLoss(player, item, points);
-    }
+    // [ТЕСТ 2026-07-07] durability-хук временно СНЯТ для замера его вклада в
+    // нагрузку (вызывается по каждому надетому предмету на каждый taken-hit,
+    // ~18x/удар для всех). На это время перк DURA_SAVE не работает. Вернуть
+    // после теста, если хук не окажется значимым источником лага.
+    // void OnPlayerDurabilityPointsLoss(Player* player, Item* item, int32& points) override
+    // {
+    //     sItemTalentsMgr->HandleDurabilityLoss(player, item, points);
+    // }
 
     // GOLD_XP_PCT (золото): бонус к деньгам с добычи СУЩЕСТВ. Хук идёт до
     // раздачи денег: в группе увеличенный котёл делится на всех - осознанно
