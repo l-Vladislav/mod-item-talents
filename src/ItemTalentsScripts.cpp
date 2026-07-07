@@ -771,6 +771,7 @@ public:
             { "choose",   HandleChooseCommand,   SEC_PLAYER,     Console::No },
             { "reset",    HandleResetCommand,    SEC_PLAYER,     Console::No },
             { "list",     HandleListCommand,     SEC_PLAYER,     Console::No },
+            { "sync",     HandleSyncCommand,     SEC_PLAYER,     Console::No },
             // GM-команды тестирования
             { "awaken",   HandleAwakenCommand,   SEC_GAMEMASTER, Console::No },
             { "setkills", HandleSetKillsCommand, SEC_GAMEMASTER, Console::No },
@@ -941,16 +942,10 @@ private:
         return true;
     }
 
-    // list: все надетые предметы системы
-    static bool HandleListCommand(ChatHandler* handler)
+    // Тело list: ITEM-строки + хеш + END. Хеш идёт ПОСЛЕ ITEM-строк и ДО END:
+    // клиент на END сохраняет локальный кэш вместе с последним полученным хешем.
+    static void SendList(ChatHandler* handler, Player* player)
     {
-        Player* player = handler->GetSession()->GetPlayer();
-        if (!sItemTalentsMgr->IsEnabled())
-        {
-            SendError(handler, "DISABLED");
-            return true;
-        }
-
         for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
         {
             Item* item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
@@ -972,7 +967,56 @@ private:
                 ItemTalentsMgr::SpentPoints(state), proto->Name1);
         }
 
+        handler->PSendSysMessage("ITALENT:HASH:{}", sItemTalentsMgr->ComputePerkHash(player));
         handler->PSendSysMessage("ITALENT:END");
+    }
+
+    // list: все надетые предметы системы
+    static bool HandleListCommand(ChatHandler* handler)
+    {
+        Player* player = handler->GetSession()->GetPlayer();
+        if (!sItemTalentsMgr->IsEnabled())
+        {
+            SendError(handler, "DISABLED");
+            return true;
+        }
+
+        SendList(handler, player);
+        return true;
+    }
+
+    // sync <hash>: быстрая верификация локального кэша аддона при входе в мир.
+    // Хеш совпал - кэш свежий/нетронутый, досылаем одной строкой только kills
+    // (в хеш они не входят); не совпал (изменились перки или экипировка, или
+    // SavedVariables подправили руками) - полный list с новым хешем.
+    static bool HandleSyncCommand(ChatHandler* handler, uint32 clientHash)
+    {
+        Player* player = handler->GetSession()->GetPlayer();
+        if (!sItemTalentsMgr->IsEnabled())
+        {
+            SendError(handler, "DISABLED");
+            return true;
+        }
+
+        if (sItemTalentsMgr->ComputePerkHash(player) != clientHash)
+        {
+            SendList(handler, player);
+            return true;
+        }
+
+        std::string kills;
+        for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
+        {
+            Item* item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+            if (!item || !ItemTalentsMgr::IsEligibleItem(item->GetTemplate()))
+                continue;
+
+            ItemTalents::ItemState& state = sItemTalentsMgr->EnsureState(player, item);
+            kills += Acore::StringFormat("{}{}={}", kills.empty() ? "" : ",",
+                slot + 1, state.kills);
+        }
+
+        handler->PSendSysMessage("ITALENT:SYNC:OK:{}", kills);
         return true;
     }
 

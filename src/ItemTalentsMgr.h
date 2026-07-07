@@ -311,6 +311,14 @@ public:
     // с качеством 0. Персист одним batched INSERT в item_talent_rolls.
     void EnsureRolled(Player* player, Item* item);
 
+    // Хеш перк-состояния НАДЕТЫХ eligible-предметов (FNV-1a 32): слот, guid,
+    // уровень пробуждения, выбранные ряды. Kills сознательно НЕ входят
+    // (меняются каждым убийством - кэш аддона инвалидировался бы любым боем);
+    // протокол .itemtalent sync досылает их отдельной строкой. Назначение -
+    // быстрая верификация локального кэша аддона при логине: совпало - кэш
+    // свежий и нетронутый, нет - полный list.
+    [[nodiscard]] uint32 ComputePerkHash(Player* player);
+
     // Перенос состояния (item_talents + item_talent_rolls + in-memory кэш)
     // со старого GUID на новый. Вызывается из mod-gear-ascension при
     // пересоздании предмета (DestroyItem -> StoreNewItem). БД - синхронно

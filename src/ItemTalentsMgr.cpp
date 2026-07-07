@@ -722,6 +722,37 @@ void ItemTalentsMgr::UnloadPlayerState(Player* player)
     _perks.erase(ownerGuid);
 }
 
+uint32 ItemTalentsMgr::ComputePerkHash(Player* player)
+{
+    // FNV-1a 32: порядок обхода слотов фиксированный, вклад предмета - слот,
+    // guid, уровень, выбранные ряды. Kills не хешируются (см. .h).
+    uint32 hash = 2166136261u;
+    auto mix = [&hash](uint32 value)
+    {
+        for (uint8 i = 0; i < 4; ++i)
+        {
+            hash ^= (value >> (i * 8)) & 0xFF;
+            hash *= 16777619u;
+        }
+    };
+
+    for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
+    {
+        Item* item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+        if (!item || !IsEligibleItem(item->GetTemplate()))
+            continue;
+
+        ItemState& state = EnsureState(player, item);
+        mix(slot);
+        mix(item->GetGUID().GetCounter());
+        mix(state.level);
+        for (uint8 row = 0; row < MAX_ROWS; ++row)
+            mix(state.rows[row]);
+    }
+
+    return hash;
+}
+
 ItemState* ItemTalentsMgr::GetState(ObjectGuid::LowType ownerGuid, ObjectGuid::LowType itemGuid)
 {
     auto ownerItr = _states.find(ownerGuid);
