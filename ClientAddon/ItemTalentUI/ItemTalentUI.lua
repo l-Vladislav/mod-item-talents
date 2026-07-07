@@ -158,6 +158,7 @@ local listAt = nil       -- время отложенного запроса lis
 
 local slotButtons = {}   -- [inv] = button
 local nodes = {}         -- [row][choice] = button
+local rowLabels = {}     -- [row] = FontString подписи ряда
 local wires = {}         -- пул текстур-сегментов пути
 
 local function Msg(text)
@@ -666,6 +667,7 @@ for row = 1, 5 do
     label:SetJustifyH("RIGHT")
     label:SetText(meta.label)
     label:SetTextColor(meta.r, meta.g, meta.b)
+    rowLabels[row] = label
 
     nodes[row] = {}
     for choice = 1, 3 do
@@ -784,6 +786,19 @@ local function Render()
     end
 
     SetTreeShown(true)
+
+    -- Легендарный ряд полностью скрыт, если предмет не эпический по
+    -- происхождению - недостижимое не дразнит (решение 2026-07-06)
+    local showRow5 = current.baseEpic ~= 0
+    if showRow5 then
+        rowLabels[5]:Show()
+    else
+        rowLabels[5]:Hide()
+        for choice = 1, 3 do
+            nodes[5][choice]:Hide()
+        end
+    end
+
     for row = 1, 5 do
         local rowData = current.rows[row]
 
