@@ -29,6 +29,7 @@
 #ifndef MOD_ITEM_TALENTS_MGR_H
 #define MOD_ITEM_TALENTS_MGR_H
 
+#include "AsyncCallbackProcessor.h"
 #include "Define.h"
 #include "ObjectGuid.h"
 #include "QueryCallback.h"
