@@ -151,7 +151,8 @@ local lastInfoAt = 0
 local invChangedAt = 0
 local popupAction = nil
 
-local invCache = {}      -- [invSlot] = {kills, free, spent} для тултипов (.itemtalent list)
+local invCache = {}      -- [invSlot] = {guid, kills, level, spent} для тултипов (.itemtalent list)
+local infoCache = {}     -- [itemGuid] = разобранный info-блок (+ .at) для мгновенного ре-рендера панели
 local listBuild = nil    -- накапливаемый ответ list
 local listReqAt = 0      -- троттлинг запросов list
 local listAt = nil       -- время отложенного запроса list
@@ -907,6 +908,21 @@ SelectSlot = function(inv)
         RenderEmpty("Слот пуст - наденьте предмет.")
         return
     end
+
+    -- Переключение слота рисуем ИЗ КЭША по GUID предмета - без обращения к
+    -- серверу (убирает задержку и рассинхрон при быстрых кликах). Дерево
+    -- талантов меняется только на выбор/сброс - а те и так присылают свежий
+    -- блок; счётчик убийств текущего предмета освежает таймер OnUpdate (10 c).
+    -- .itemtalent info шлём ТОЛЬКО если блок ещё ни разу не грузился (list
+    -- даёт лишь сводку kills/level, но не сами роллы/выборы рядов).
+    local st = invCache[inv]
+    local cached = st and st.guid and infoCache[st.guid]
+    if cached then
+        current = cached
+        lastInfoAt = GetTime()
+        Render()
+        return
+    end
     lastInfoAt = GetTime()
     SendCmd(string.format(".itemtalent info inv %d", inv))
 end
@@ -952,10 +968,18 @@ local function ParseLine(msg)
     if msg == "ITALENT:END" then
         if pending then
             pending.maxRow = MAX_IMPLEMENTED_ROW
-            current = pending
+            pending.at = GetTime()
+            infoCache[pending.guid] = pending -- кэш по GUID для мгновенного ре-рендера
+            -- Применяем ответ, ТОЛЬКО если он для текущего выбранного слота
+            -- (при быстром переключении медленный ответ по другому слоту не
+            -- должен затирать картинку); при холодном invCache - применяем.
+            local st = invCache[selectedInv or 0]
+            if not (st and st.guid) or st.guid == pending.guid then
+                current = pending
+                lastInfoAt = GetTime()
+                Render()
+            end
             pending = nil
-            lastInfoAt = GetTime()
-            Render()
         elseif listBuild then
             invCache = listBuild
             listBuild = nil
@@ -1041,12 +1065,14 @@ local function ParseLine(msg)
         end
     end
 
-    -- ITEM-строки ответа list: состояния надетых предметов для тултипов
-    local iSlot, iKills, iLevel, iSpent =
-        msg:match("^ITALENT:ITEM:(%d+):%d+:%a:%d+:(%d+):(%d+):(%d+):")
+    -- ITEM-строки ответа list: состояния надетых предметов для тултипов.
+    -- guid захватываем (2-е поле) - им ключуется кэш info-блоков (infoCache).
+    local iSlot, iGuid, iKills, iLevel, iSpent =
+        msg:match("^ITALENT:ITEM:(%d+):(%d+):%a:%d+:(%d+):(%d+):(%d+):")
     if iSlot then
         listBuild = listBuild or {}
         listBuild[tonumber(iSlot)] = {
+            guid = tonumber(iGuid),
             kills = tonumber(iKills), level = tonumber(iLevel), spent = tonumber(iSpent),
         }
         return true
