@@ -927,12 +927,11 @@ SelectSlot = function(inv)
         return
     end
 
-    -- Переключение слота рисуем ИЗ КЭША по GUID предмета - без обращения к
-    -- серверу (убирает задержку и рассинхрон при быстрых кликах). Дерево
-    -- талантов меняется только на выбор/сброс - а те и так присылают свежий
-    -- блок; счётчик убийств текущего предмета освежает таймер OnUpdate (10 c).
-    -- .itemtalent info шлём ТОЛЬКО если блок ещё ни разу не грузился (list
-    -- даёт лишь сводку kills/level, но не сами роллы/выборы рядов).
+    -- Дерево талантов из КЭША по GUID рисуем МГНОВЕННО (оно статично, меняется
+    -- только на выбор/сброс) - без задержки и мигания. Но затем ВСЕГДА
+    -- дозапрашиваем свежий блок с сервера: волатильные поля (kills, «рядом с
+    -- мастером») растут в игре, а раньше return тут держал старое значение из
+    -- кэша до перезахода. Ответ обновит только счётчики, дерево не дёрнется.
     local st = invCache[inv]
     local guid = st and st.guid
     local cached = guid and infoCache[guid]
@@ -942,12 +941,10 @@ SelectSlot = function(inv)
     end
     if cached then
         current = cached
-        lastInfoAt = GetTime()
-        Render()
-        return
+        Render() -- мгновенно из кэша (дерево)
     end
     lastInfoAt = GetTime()
-    SendCmd(string.format(".itemtalent info inv %d", inv))
+    SendCmd(string.format(".itemtalent info inv %d", inv)) -- свежие kills/мастер
 end
 
 local function ShowPanel()
