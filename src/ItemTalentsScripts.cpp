@@ -385,6 +385,10 @@ public:
     {
         if (!unit || !aura || !unit->IsPlayer())
             return;
+        // Боты вне системы: пропускаем ДО IsFamiliarOwnerAura, иначе цикл по
+        // диапазонам крутится на каждую ауру каждого бота.
+        if (sItemTalentsMgr->ShouldIgnorePlayer(unit->ToPlayer()))
+            return;
 
         if (sItemTalentsMgr->IsFamiliarOwnerAura(aura->GetId()))
             sItemTalentsMgr->OnFamiliarAuraChanged(unit->ToPlayer());
@@ -393,6 +397,8 @@ public:
     void OnAuraRemove(Unit* unit, AuraApplication* aurApp, AuraRemoveMode /*mode*/) override
     {
         if (!unit || !aurApp || !unit->IsPlayer())
+            return;
+        if (sItemTalentsMgr->ShouldIgnorePlayer(unit->ToPlayer()))
             return;
 
         // Хук идёт ПОСЛЕ удаления из m_appliedAuras (Unit.cpp ~4894) -
