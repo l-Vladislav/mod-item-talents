@@ -1213,6 +1213,23 @@ charBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
 -- События / слэш
 -- ---------------------------------------------------------------------------
 
+-- Снимок надетых предметов: UNIT_INVENTORY_CHANGED срабатывает на ЛЮБОЕ
+-- изменение сумки (лут/перекладывание), а нам нужна именно смена ЭКИПИРОВКИ
+-- (нечастое действие). Сверяем ссылки предметов в отслеживаемых слотах со
+-- снимком; true = что-то из экипировки сменилось (снимок при этом обновляется).
+local equipSnapshot = {}
+local function EquipmentChanged()
+    local changed = false
+    for _, def in ipairs(SLOT_LIST) do
+        local link = GetInventoryItemLink("player", def.inv)
+        if equipSnapshot[def.inv] ~= link then
+            equipSnapshot[def.inv] = link
+            changed = true
+        end
+    end
+    return changed
+end
+
 local ev = CreateFrame("Frame")
 ev:RegisterEvent("PLAYER_LOGIN")
 ev:RegisterEvent("PLAYER_ENTERING_WORLD")
@@ -1248,12 +1265,26 @@ ev:SetScript("OnEvent", function(self, event, arg1)
         else
             listAt = GetTime() + 8 -- прогреть кэш тултипов после входа в мир
         end
+        EquipmentChanged() -- засеять снимок экипировки (результат не нужен)
     elseif event == "UNIT_INVENTORY_CHANGED" and arg1 == "player" then
-        listAt = GetTime() + 2
+        local equipChanged = EquipmentChanged()
+        if equipChanged then
+            -- Экипировка сменилась: чистим панельный кэш, иначе слот рисуется по
+            -- устаревшему guid прежнего предмета (и clobber-guard отклоняет
+            -- свежий ответ сервера) - отсюда "иконка меняется при надевании".
+            infoCache = {}
+            invCache = {}
+        end
+        listAt = GetTime() + (equipChanged and 1 or 2)
         if f:IsShown() then
             UpdateSlotButtons()
             local now = GetTime()
-            if now - invChangedAt > 1 then
+            -- Смена предмета обновляет панель СРАЗУ (без 1с троттлинга): перевыбор
+            -- текущего слота со свежими данными (кэш уже очищен -> запрос к серверу).
+            if equipChanged then
+                invChangedAt = now
+                if selectedInv then SelectSlot(selectedInv) end
+            elseif now - invChangedAt > 1 then
                 invChangedAt = now
                 if selectedInv and GetInventoryItemLink("player", selectedInv) then
                     Refresh()
