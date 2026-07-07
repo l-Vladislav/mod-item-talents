@@ -2,7 +2,7 @@
 ## Title: ItemTalentUI |cffc8a24b(Пробуждение снаряжения)|r
 ## Notes: Панель талантов предмета для mod-item-talents. Кнопка на окне персонажа или /itu.
 ## Author: l-Vladislav
-## Version: 0.5
+## Version: 0.6
 ## SavedVariables: ItemTalentUIDB
 
 ItemTalentUI.lua

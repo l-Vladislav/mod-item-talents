@@ -477,11 +477,11 @@ local function SetNodeState(btn, state, quality)
     local dim = 1.0
 
     if state == "chosen" then
-        glow:SetVertexColor(1.0, 0.82, 0.15)
-        glow:SetAlpha(0.6)
+        glow:SetVertexColor(qc.r, qc.g, qc.b)  -- свечение = цвет качества узла
+        glow:SetAlpha(0.65)
         glow:Show()
     elseif state == "avail" then
-        glow:SetVertexColor(0.55, 0.95, 0.35)
+        glow:SetVertexColor(qc.r, qc.g, qc.b)  -- свечение = цвет качества узла
         glow:SetAlpha(0.5)
         glow:Show()
         glow.pulse:Play()
@@ -644,11 +644,14 @@ local function CreateNode(row, choice)
     btn.row = row
     btn.choice = choice
 
-    -- Пропорции кнопки миникарты (LibDBIcon): иконка 17px, кольцо 53px,
-    -- центр видимого круга смещён на (15.5, 14.5) от TOPLEFT текстуры -
-    -- сам круг нарисован НЕ по центру холста MiniMap-TrackingBorder.
-    local iconSize = 24
-    local s = iconSize / 17
+    -- MiniMap-TrackingBorder: видимый круг НЕ по центру холста, его центр
+    -- смещён на (15.5, 14.5) от TOPLEFT текстуры 53px. РАЗМЕР кольца считаем
+    -- от NODE_SIZE (а не от иконки - иначе кольцо растёт вместе с иконкой и та
+    -- всегда остаётся одной долей отверстия = "мелкой"). scale = ring/53 держит
+    -- круг концентричным с центром кнопки; иконка независимо заполняет отверстие.
+    local ringSize = NODE_SIZE * 53 / 42   -- внешний круг ≈ размер узла
+    local scale = ringSize / 53
+    local iconSize = NODE_SIZE * 0.74      -- заполняет отверстие кольца
 
     local icon = btn:CreateTexture(nil, "ARTWORK")
     icon:SetWidth(iconSize)
@@ -659,9 +662,9 @@ local function CreateNode(row, choice)
 
     local ring = btn:CreateTexture(nil, "OVERLAY")
     ring:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
-    ring:SetWidth(53 * s)
-    ring:SetHeight(53 * s)
-    ring:SetPoint("TOPLEFT", btn, "CENTER", -15.5 * s, 14.5 * s)
+    ring:SetWidth(ringSize)
+    ring:SetHeight(ringSize)
+    ring:SetPoint("TOPLEFT", btn, "CENTER", -15.5 * scale, 14.5 * scale)
     btn.ring = ring
 
     -- Круглое радиальное свечение ПОД узлом (UI-ActionButton-Border
