@@ -925,8 +925,9 @@ void ItemTalentsMgr::EnsureRolled(Player* player, Item* item)
     if (values.empty())
         return;
 
-    // Sync-запись допустима: ролл - разовое событие на предмет.
-    CharacterDatabase.DirectExecute(
+    // Async: роллы уже в памяти (state.rolls) до записи, ждать завершения
+    // INSERT на мировом потоке незачем - убираем блокирующий DirectExecute.
+    CharacterDatabase.Execute(
         "INSERT INTO item_talent_rolls (item_guid, `row`, slot, choice, quality) VALUES "
         + values + " ON DUPLICATE KEY UPDATE choice = VALUES(choice), "
         "quality = VALUES(quality)");
@@ -1692,12 +1693,28 @@ void ItemTalentsMgr::UpdateNemesisCache(uint32 diff)
     if (_nemesisTableStatus < 0)
         return;
 
-    _nemesisSpawnIds.clear();
-    if (QueryResult result = CharacterDatabase.Query("SELECT guid FROM character_nemesis"))
-        do
-        {
-            _nemesisSpawnIds.insert(ObjectGuid::LowType(result->Fetch()[0].Get<uint64>()));
-        } while (result->NextRow());
+    // Async: НЕ блокируем мировой тик (раньше был синхронный Query каждые 30с).
+    // Старый кэш живёт, пока не вернётся новый результат (чистим ВНУТРИ колбэка).
+    // Ре-энтри-гард: не плодим запросы, если предыдущий ещё не вернулся.
+    if (_nemesisQueryInFlight)
+        return;
+    _nemesisQueryInFlight = true;
+    _nemesisQuery.AddCallback(CharacterDatabase.AsyncQuery(
+        "SELECT guid FROM character_nemesis").WithCallback([this](QueryResult result)
+    {
+        _nemesisSpawnIds.clear();
+        if (result)
+            do
+            {
+                _nemesisSpawnIds.insert(ObjectGuid::LowType(result->Fetch()[0].Get<uint64>()));
+            } while (result->NextRow());
+        _nemesisQueryInFlight = false;
+    }));
+}
+
+void ItemTalentsMgr::ProcessAsyncQueries()
+{
+    _nemesisQuery.ProcessReadyCallbacks();
 }
 
 // ---------------------------------------------------------------------------

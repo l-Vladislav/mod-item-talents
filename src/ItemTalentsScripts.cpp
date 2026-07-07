@@ -194,6 +194,7 @@ public:
 
     void OnUpdate(uint32 diff) override
     {
+        sItemTalentsMgr->ProcessAsyncQueries(); // забрать готовые async-результаты
         sItemTalentsMgr->UpdateNemesisCache(diff);
         // Болты активных Фамильяров-фантомов (прок ряда 5, пул H)
         sItemTalentsMgr->UpdatePhantoms(diff);

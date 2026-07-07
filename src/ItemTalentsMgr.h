@@ -31,6 +31,7 @@
 
 #include "Define.h"
 #include "ObjectGuid.h"
+#include "QueryCallback.h"
 #include <array>
 #include <optional>
 #include <string>
@@ -414,6 +415,7 @@ public:
     [[nodiscard]] uint32 GetNemesisBonusPct(Player* player) const;
     [[nodiscard]] bool IsNemesisTarget(Creature* creature) const;
     void UpdateNemesisCache(uint32 diff); // из WorldScript::OnUpdate
+    void ProcessAsyncQueries();           // пампит _nemesisQuery, каждый тик из OnUpdate
     // FAMILIAR_ALL_STATS: пересчёт при изменении владельческих аур фамильяра
     [[nodiscard]] bool IsFamiliarOwnerAura(uint32 spellId) const;
     void OnFamiliarAuraChanged(Player* player);
@@ -510,7 +512,11 @@ private:
     uint32 _nemesisRefreshMs = 30000;
     uint32 _nemesisRefreshTimer = 0;
     int8 _nemesisTableStatus = 0; // 0 = не проверяли, 1 = есть, -1 = таблицы нет
+    bool _nemesisQueryInFlight = false; // async-запрос кэша ещё не вернулся
     std::unordered_set<ObjectGuid::LowType> _nemesisSpawnIds;
+    // Асинхронные запросы (кэш немезид) - чтобы не блокировать мировой поток;
+    // пампится каждый тик из WorldScript::OnUpdate (ProcessAsyncQueries).
+    QueryCallbackProcessor _nemesisQuery;
 
     // Владельческие ауры фамильяров (гача): диапазоны spell id
     std::vector<std::pair<uint32, uint32>> _familiarAuraRanges;
