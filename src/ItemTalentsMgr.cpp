@@ -443,9 +443,20 @@ bool ItemTalentsMgr::ShouldIgnorePlayer(Player* player) const
 // Статика по предмету (DESIGN §4)
 // ---------------------------------------------------------------------------
 
-std::optional<char> ItemTalentsMgr::GetPool(uint32 itemClass, uint32 itemSubClass)
+std::optional<char> ItemTalentsMgr::GetPool(uint32 itemClass, uint32 itemSubClass,
+    uint32 itemInvType)
 {
     if (itemClass == ITEM_CLASS_ARMOR)
+    {
+        // Держим-в-руке (тома/сферы/скипетры): class 4, subclass 0 "Misc",
+        // InvType 23 HOLDABLE - кастерское доп. в левую руку. Пул A (ткань):
+        // выносливость/интеллект/дух/сила заклинаний. Гейт строго по InvType:
+        // тот же subclass 0 несут кольца/тринкеты/амулеты (другие InvType),
+        // их в систему не пускаем.
+        if (itemSubClass == ITEM_SUBCLASS_ARMOR_MISC
+            && itemInvType == INVTYPE_HOLDABLE)
+            return 'A';
+
         switch (itemSubClass)
         {
             case ITEM_SUBCLASS_ARMOR_CLOTH:   return 'A';
@@ -455,6 +466,7 @@ std::optional<char> ItemTalentsMgr::GetPool(uint32 itemClass, uint32 itemSubClas
             case ITEM_SUBCLASS_ARMOR_SHIELD:  return 'E';
             default:                          return std::nullopt;
         }
+    }
 
     if (itemClass == ITEM_CLASS_WEAPON)
         switch (itemSubClass)
@@ -504,7 +516,7 @@ bool ItemTalentsMgr::IsEligibleItem(ItemTemplate const* proto)
     if (!RowsOpenForQuality(proto->Quality))
         return false;
 
-    return GetPool(proto->Class, proto->SubClass).has_value();
+    return GetPool(proto->Class, proto->SubClass, proto->InventoryType).has_value();
 }
 
 TalentDef const* ItemTalentsMgr::GetDef(char pool, uint8 row, uint8 choice,
@@ -605,7 +617,7 @@ TalentDef const* ItemTalentsMgr::GetDefForItem(ItemTemplate const* proto, uint8 
         if (ItemTalents::NamedDef const* namedDef = GetNamedDef(proto->ItemId, choice))
             return &namedDef->def;
 
-    std::optional<char> pool = GetPool(proto->Class, proto->SubClass);
+    std::optional<char> pool = GetPool(proto->Class, proto->SubClass, proto->InventoryType);
     return pool ? GetDef(*pool, row, choice, int16(proto->SubClass)) : nullptr;
 }
 
@@ -829,7 +841,7 @@ void ItemTalentsMgr::EnsureRolled(Player* player, Item* item)
     if (!proto)
         return;
 
-    std::optional<char> pool = GetPool(proto->Class, proto->SubClass);
+    std::optional<char> pool = GetPool(proto->Class, proto->SubClass, proto->InventoryType);
     if (!pool)
         return;
 
@@ -1161,7 +1173,7 @@ void ItemTalentsMgr::ApplyTalent(Player* player, Item* item, uint8 row, uint8 sl
             return;
         }
 
-    std::optional<char> pool = GetPool(proto->Class, proto->SubClass);
+    std::optional<char> pool = GetPool(proto->Class, proto->SubClass, proto->InventoryType);
     if (!pool)
         return;
 

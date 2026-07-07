@@ -840,7 +840,7 @@ private:
     static void SendItemInfo(ChatHandler* handler, Player* player, Item* item)
     {
         ItemTemplate const* proto = item->GetTemplate();
-        std::optional<char> pool = ItemTalentsMgr::GetPool(proto->Class, proto->SubClass);
+        std::optional<char> pool = ItemTalentsMgr::GetPool(proto->Class, proto->SubClass, proto->InventoryType);
         // EnsureState лениво роллит слоты предмета (EnsureRolled внутри)
         ItemTalents::ItemState& state = sItemTalentsMgr->EnsureState(player, item);
 
@@ -1003,7 +1003,7 @@ private:
             if (!ItemTalentsMgr::IsEligibleItem(proto))
                 continue;
 
-            std::optional<char> pool = ItemTalentsMgr::GetPool(proto->Class, proto->SubClass);
+            std::optional<char> pool = ItemTalentsMgr::GetPool(proto->Class, proto->SubClass, proto->InventoryType);
             ItemTalents::ItemState& state = sItemTalentsMgr->EnsureState(player, item);
             // slot+1 = клиентский inv-слот; spent нужен аддону для строки
             // "Пробуждён" в тултипе предмета; kills - счётчик внутри уровня,

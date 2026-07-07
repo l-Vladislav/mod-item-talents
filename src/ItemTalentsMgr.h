@@ -252,8 +252,11 @@ public:
     [[nodiscard]] bool ShouldIgnorePlayer(Player* player) const;
 
     // ---- статика по предмету ----
-    // (class, subclass) -> пул A..H; nullopt = предмет вне системы (DESIGN §4)
-    static std::optional<char> GetPool(uint32 itemClass, uint32 itemSubClass);
+    // (class, subclass, InvType) -> пул A..H; nullopt = предмет вне системы
+    // (DESIGN §4). InvType нужен для держим-в-руке (class4/subclass0/InvType23
+    // -> пул A), чтобы не спутать с кольцами/тринкетами того же subclass 0.
+    static std::optional<char> GetPool(uint32 itemClass, uint32 itemSubClass,
+        uint32 itemInvType = 0);
     // качество 1..5+ -> 1..5 открытых рядов; 0 (серое) и 7 (наследие) -> 0
     static uint8 RowsOpenForQuality(uint32 quality);
     // пул есть, качество подходит, не рубашка (InvType 4) и не накидка (19)

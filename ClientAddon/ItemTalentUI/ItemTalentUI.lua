@@ -157,6 +157,7 @@ local listBuild = nil    -- накапливаемый ответ list
 local listReqAt = 0      -- троттлинг запросов list
 local listAt = nil       -- время отложенного запроса list
 local syncAt = nil       -- время отложенной верификации кэша (.itemtalent sync)
+local didInitialSync = false -- разовое восстановление кэша за сессию
 local syncPending = false -- ждём ответ на .itemtalent sync (для инвалидации деревьев)
 local lastHash = nil     -- хеш перк-состояния из последней строки ITALENT:HASH
 local charKey = nil      -- "Realm-Name": ключ локального кэша в ItemTalentUIDB.chars
@@ -950,6 +951,9 @@ end
 local function ShowPanel()
     f:Show()
     UpdateSlotButtons()
+    -- Данные по убийствам/уровню всех надетых предметов обновляем ОДИН раз
+    -- при открытии панели (решение 2026-07-07) - без фонового поллинга.
+    RequestList()
     -- автоселект: прежний слот, иначе правая рука, иначе первый занятый
     local pick = selectedInv
     if not pick or not GetInventoryItemLink("player", pick) then
@@ -972,13 +976,9 @@ local function ShowPanel()
     end
 end
 
--- Автообновление раз в 10 секунд, пока панель открыта (kills растут в бою)
-f:SetScript("OnUpdate", function()
-    if current and GetTime() - lastInfoAt > 10 then
-        lastInfoAt = GetTime()
-        Refresh()
-    end
-end)
+-- Данные (в т.ч. убийства/уровень) запрашиваются ОДИН РАЗ при открытии
+-- панели/выборе слота и после действий выбора/сброса - без поллинга
+-- (решение 2026-07-07). OnUpdate-автообновление убрано.
 
 -- ---------------------------------------------------------------------------
 -- Протокол
@@ -1225,6 +1225,11 @@ ev:SetScript("OnEvent", function(self, event, arg1)
         RenderEmpty()
         Msg("загружен. Кнопка на окне персонажа, /itu или Alt+клик по надетому предмету.")
     elseif event == "PLAYER_ENTERING_WORLD" then
+        -- Только ОДИН раз за сессию: PLAYER_ENTERING_WORLD бьёт на каждой
+        -- загрузке (телепорт/данж), а восстановить кэш и убийства достаточно
+        -- единожды - дальше kills обновляются при открытии панели.
+        if didInitialSync then return end
+        didInitialSync = true
         charKey = charKey or (GetRealmName() .. "-" .. UnitName("player"))
         local saved = ItemTalentUIDB.chars and ItemTalentUIDB.chars[charKey]
         -- Требуем saved.trees: старый формат (v<=0.4) без деревьев/guid не даёт
@@ -1246,7 +1251,9 @@ ev:SetScript("OnEvent", function(self, event, arg1)
             listAt = GetTime() + 8 -- прогреть кэш тултипов после входа в мир
         end
     elseif event == "UNIT_INVENTORY_CHANGED" and arg1 == "player" then
-        listAt = GetTime() + 2
+        -- Фоновый list на смену экипировки убран: убийства обновляются
+        -- при открытии панели. Пока панель открыта - только перерисовка
+        -- слотов и точечный info выбранного (смена вещи - действие игрока).
         if f:IsShown() then
             UpdateSlotButtons()
             local now = GetTime()
