@@ -685,6 +685,7 @@ end
 
 local function SetTreeShown(shown)
     for row = 1, 5 do
+        if shown then rowLabels[row]:Show() else rowLabels[row]:Hide() end
         for choice = 1, 3 do
             if shown then
                 nodes[row][choice]:Show()
@@ -795,15 +796,15 @@ local function Render()
 
     SetTreeShown(true)
 
-    -- Легендарный ряд полностью скрыт, если предмет не эпический по
-    -- происхождению - недостижимое не дразнит (решение 2026-07-06)
-    local showRow5 = current.baseEpic ~= 0
-    if showRow5 then
-        rowLabels[5]:Show()
-    else
-        rowLabels[5]:Hide()
-        for choice = 1, 3 do
-            nodes[5][choice]:Hide()
+    -- Ряды, не открытые качеством, НЕ показываем вовсе (решение 2026-07-06):
+    -- белый предмет видит только "Заточку", зелёный - два ряда и т.д.
+    -- rowsOpen уже учитывает и правило базовых эпиков для ряда 5.
+    for row = 1, 5 do
+        if row > current.rowsOpen then
+            rowLabels[row]:Hide()
+            for choice = 1, 3 do
+                nodes[row][choice]:Hide()
+            end
         end
     end
 
