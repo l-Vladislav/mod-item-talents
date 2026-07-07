@@ -155,6 +155,9 @@ local invCache = {}      -- [invSlot] = {kills, free, spent} для тултип
 local listBuild = nil    -- накапливаемый ответ list
 local listReqAt = 0      -- троттлинг запросов list
 local listAt = nil       -- время отложенного запроса list
+local syncAt = nil       -- время отложенной верификации кэша (.itemtalent sync)
+local lastHash = nil     -- хеш перк-состояния из последней строки ITALENT:HASH
+local charKey = nil      -- "Realm-Name": ключ локального кэша в ItemTalentUIDB.chars
 
 local slotButtons = {}   -- [inv] = button
 local nodes = {}         -- [row][choice] = button
@@ -175,6 +178,20 @@ local function RequestList()
     if GetTime() - listReqAt < 5 then return end
     listReqAt = GetTime()
     SendCmd(".itemtalent list")
+end
+
+-- Локальный кэш тултипов между сессиями (SavedVariables). Валидность
+-- подтверждает сервер по хешу (.itemtalent sync) при входе в мир:
+-- совпало - кэш свежий, сервер досылает только kills; разошлось
+-- (перки/экипировка изменились или кэш подправили руками) - полный list.
+local function SaveCache()
+    if not charKey or not lastHash then return end
+    local inv = {}
+    for slot, st in pairs(invCache) do
+        inv[slot] = { kills = st.kills, level = st.level, spent = st.spent }
+    end
+    ItemTalentUIDB.chars = ItemTalentUIDB.chars or {}
+    ItemTalentUIDB.chars[charKey] = { hash = lastHash, inv = inv }
 end
 
 local function EffectMeta(effect, name)
@@ -452,9 +469,10 @@ local function SetNodeState(btn, state, quality)
         glow:SetAlpha(0.5)
         glow:Show()
         glow.pulse:Play()
-    elseif state == "open" then -- ряд открыт, но нет свободных очков
+    elseif state == "open" then -- ряд ждёт свой уровень пробуждения
         dim = 0.7
         icon:SetVertexColor(0.7, 0.7, 0.7)
+        lock:Show() -- будет доступен гриндом: замок, а не пустота
     elseif state == "dim" then  -- в ряду уже есть другой выбор
         dim = 0.4
         icon:SetDesaturated(true)
@@ -806,16 +824,17 @@ local function Render()
 
     SetTreeShown(true)
 
-    -- Закрытые ряды показываем с замками и подписью уровня пробуждения
-    -- (решение 2026-07-07); скрыт только ряд 5 у предметов, не эпических
-    -- по происхождению - он недостижим в принципе.
+    -- Финальная схема (2026-07-07): ряды выше качества предмета СКРЫТЫ
+    -- (без GA-апгрейда недостижимы - показывать нечего), а ряды, ждущие
+    -- своего уровня пробуждения, видны С ЗАМКОМ и подписью "уровень N" -
+    -- их можно добить гриндом. rowsOpen уже учитывает базовых эпиков.
     for row = 1, 5 do
         local note = rowNotes[row]
-        if row == 5 and current.baseEpic == 0 then
-            rowLabels[5]:Hide()
+        if row > current.rowsOpen then
+            rowLabels[row]:Hide()
             note:Hide()
             for choice = 1, 3 do
-                nodes[5][choice]:Hide()
+                nodes[row][choice]:Hide()
             end
         elseif current.rows[row].chosen == 0 and (current.level or 0) < row then
             note:SetText(string.format("уровень %d", row))
@@ -940,7 +959,26 @@ local function ParseLine(msg)
         elseif listBuild then
             invCache = listBuild
             listBuild = nil
+            SaveCache()
         end
+        return true
+    end
+
+    -- Хеш перк-состояния (приходит между ITEM-строками и END ответа list)
+    local h = msg:match("^ITALENT:HASH:(%d+)$")
+    if h then
+        lastHash = tonumber(h)
+        return true
+    end
+
+    -- Кэш подтверждён: обновляем только kills (в хеш они не входят)
+    local syncKills = msg:match("^ITALENT:SYNC:OK:?(.*)$")
+    if syncKills then
+        for slot, kills in syncKills:gmatch("(%d+)=(%d+)") do
+            local st = invCache[tonumber(slot)]
+            if st then st.kills = tonumber(kills) end
+        end
+        SaveCache()
         return true
     end
 
@@ -1030,12 +1068,16 @@ end)
 -- Тултипы предметов и Alt+клик
 -- ---------------------------------------------------------------------------
 
--- Отложенные запросы list
+-- Отложенные запросы list / верификация локального кэша
 local updater = CreateFrame("Frame")
 updater:SetScript("OnUpdate", function()
     if listAt and GetTime() >= listAt then
         listAt = nil
         RequestList()
+    end
+    if syncAt and GetTime() >= syncAt then
+        syncAt = nil
+        SendCmd(".itemtalent sync " .. lastHash)
     end
 end)
 
@@ -1128,7 +1170,20 @@ ev:SetScript("OnEvent", function(self, event, arg1)
         RenderEmpty()
         Msg("загружен. Кнопка на окне персонажа, /itu или Alt+клик по надетому предмету.")
     elseif event == "PLAYER_ENTERING_WORLD" then
-        listAt = GetTime() + 8 -- прогреть кэш тултипов после входа в мир
+        charKey = charKey or (GetRealmName() .. "-" .. UnitName("player"))
+        local saved = ItemTalentUIDB.chars and ItemTalentUIDB.chars[charKey]
+        if saved and saved.hash and saved.inv then
+            -- Тултипы сразу из локального кэша; сервер подтвердит его хешем
+            -- (совпало - пришлёт только kills, нет - полный list)
+            invCache = {}
+            for slot, st in pairs(saved.inv) do
+                invCache[slot] = { kills = st.kills, level = st.level, spent = st.spent }
+            end
+            lastHash = saved.hash
+            syncAt = GetTime() + 8
+        else
+            listAt = GetTime() + 8 -- прогреть кэш тултипов после входа в мир
+        end
     elseif event == "UNIT_INVENTORY_CHANGED" and arg1 == "player" then
         listAt = GetTime() + 2
         if f:IsShown() then
