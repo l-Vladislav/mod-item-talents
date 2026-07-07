@@ -292,6 +292,14 @@ void ItemTalentsMgr::LoadDefinitions()
         return;
     }
 
+    if (!CharColumnExists("item_talents", "item_entry"))
+    {
+        LOG_WARN("module", "mod-item-talents: item_talents.item_entry is missing; module "
+            "disabled until pending_db_characters/mod_item_talents_entry.sql is applied.");
+        _enable = false;
+        return;
+    }
+
     if (!CharTableExists("item_talent_rolls"))
     {
         LOG_WARN("module", "mod-item-talents: acore_characters.item_talent_rolls is missing; "
@@ -683,8 +691,8 @@ void ItemTalentsMgr::LoadPlayerState(Player* player)
     OwnerStates& states = _states[ownerGuid]; // помечает владельца загруженным даже при 0 строк
 
     QueryResult result = CharacterDatabase.Query(
-        "SELECT item_guid, row1, row2, row3, row4, row5, kills, level FROM item_talents "
-        "WHERE owner_guid = {}", ownerGuid);
+        "SELECT item_guid, row1, row2, row3, row4, row5, kills, level, item_entry "
+        "FROM item_talents WHERE owner_guid = {}", ownerGuid);
     if (!result)
         return;
 
@@ -696,6 +704,7 @@ void ItemTalentsMgr::LoadPlayerState(Player* player)
             state.rows[i] = fields[1 + i].Get<uint8>();
         state.kills = fields[6].Get<uint32>();
         state.level = std::min<uint8>(fields[7].Get<uint8>(), MAX_ROWS);
+        state.entry = fields[8].Get<uint32>();
         state.dirty = false;
     } while (result->NextRow());
 
@@ -790,7 +799,7 @@ ItemState& ItemTalentsMgr::EnsureState(Player* player, Item* item)
         // (owner_guid в БД обновляется только при INSERT) - точечный SELECT.
         ItemState state;
         if (QueryResult result = CharacterDatabase.Query(
-            "SELECT row1, row2, row3, row4, row5, kills, level FROM item_talents "
+            "SELECT row1, row2, row3, row4, row5, kills, level, item_entry FROM item_talents "
             "WHERE item_guid = {}", itemGuid))
         {
             Field* fields = result->Fetch();
@@ -798,6 +807,7 @@ ItemState& ItemTalentsMgr::EnsureState(Player* player, Item* item)
                 state.rows[i] = fields[i].Get<uint8>();
             state.kills = fields[5].Get<uint32>();
             state.level = std::min<uint8>(fields[6].Get<uint8>(), MAX_ROWS);
+            state.entry = fields[7].Get<uint32>();
         }
 
         if (QueryResult rolls = CharacterDatabase.Query(
@@ -817,6 +827,31 @@ ItemState& ItemTalentsMgr::EnsureState(Player* player, Item* item)
             } while (rolls->NextRow());
 
         itr = states.emplace(itemGuid, state).first;
+    }
+
+    // Защита от переиспользования GUID: если строка штампована ЧУЖИМ entry -
+    // это освободившийся GUID уничтоженного предмета, доставшийся новому.
+    // Сбрасываем чужой прогресс (килы/уровень/выборы/роллы) и штампуем заново.
+    ItemState& st = itr->second;
+    uint32 const curEntry = item->GetEntry();
+    if (st.entry != 0 && st.entry != curEntry)
+    {
+        st.rows = { };
+        st.rolls = { };
+        st.kills = 0;
+        st.level = 0;
+        st.entry = curEntry;
+        st.dirty = false;
+        CharacterDatabase.DirectExecute(
+            "DELETE FROM item_talents WHERE item_guid = {}", itemGuid);
+        CharacterDatabase.DirectExecute(
+            "DELETE FROM item_talent_rolls WHERE item_guid = {}", itemGuid);
+    }
+    else if (st.entry != curEntry) // 0 = не штамповано (новый/бэкфилл): штампуем
+    {
+        st.entry = curEntry;
+        CharacterDatabase.Execute(
+            "UPDATE item_talents SET item_entry = {} WHERE item_guid = {}", curEntry, itemGuid);
     }
 
     // Ленивый ролл слотов (DESIGN "Роллы перков и качество"): только реальным
@@ -1066,8 +1101,8 @@ void ItemTalentsMgr::FlushKills(Player* player)
 
         if (!values.empty())
             values += ',';
-        values += Acore::StringFormat("({},{},{},{})", itemGuid, ownerGuid, state.kills,
-            state.level);
+        values += Acore::StringFormat("({},{},{},{},{})", itemGuid, ownerGuid, state.kills,
+            state.level, state.entry);
         state.dirty = false;
     }
 
@@ -1077,11 +1112,11 @@ void ItemTalentsMgr::FlushKills(Player* player)
     // АБСОЛЮТНЫЕ значения (не дельта: сброс kills при взятии уровня ломает
     // модель kills = kills + delta; гонок нет - kills предмета меняет только
     // его владелец онлайн). owner_guid обновляем тоже: предмет могли
-    // передать до привязки.
+    // передать до привязки. item_entry штампуем против переиспользования GUID.
     CharacterDatabase.Execute(
-        "INSERT INTO item_talents (item_guid, owner_guid, kills, level) VALUES " + values +
-        " ON DUPLICATE KEY UPDATE kills = VALUES(kills), level = VALUES(level), "
-        "owner_guid = VALUES(owner_guid)");
+        "INSERT INTO item_talents (item_guid, owner_guid, kills, level, item_entry) VALUES "
+        + values + " ON DUPLICATE KEY UPDATE kills = VALUES(kills), level = VALUES(level), "
+        "owner_guid = VALUES(owner_guid), item_entry = VALUES(item_entry)");
 }
 
 void ItemTalentsMgr::SetKills(Player* player, Item* item, uint32 kills)
@@ -1815,12 +1850,12 @@ void ItemTalentsMgr::SaveChoice(Player* player, Item* item, uint8 row, uint8 slo
     // заодно фиксируем несохранённый прогресс этого предмета
     CharacterDatabase.DirectExecute(
         "INSERT INTO item_talents (item_guid, owner_guid, row1, row2, row3, row4, row5, "
-        "kills, level) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}) "
+        "kills, level, item_entry) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}) "
         "ON DUPLICATE KEY UPDATE row{} = {}, kills = VALUES(kills), level = VALUES(level), "
-        "owner_guid = VALUES(owner_guid)",
+        "owner_guid = VALUES(owner_guid), item_entry = VALUES(item_entry)",
         item->GetGUID().GetCounter(), player->GetGUID().GetCounter(),
         state.rows[0], state.rows[1], state.rows[2], state.rows[3], state.rows[4],
-        state.kills, state.level, row, slot);
+        state.kills, state.level, state.entry, row, slot);
     state.dirty = false;
 }
 
