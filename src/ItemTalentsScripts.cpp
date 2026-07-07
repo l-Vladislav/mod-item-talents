@@ -119,7 +119,7 @@ namespace
         if (c == "ROW_SOON")       return "Этот ряд пока недоступен: скоро.";
         if (c == "BAD_CHOICE")     return "Такой вариант недоступен.";
         if (c == "ALREADY_CHOSEN") return "В этом ряду уже выбран перк.";
-        if (c == "NO_POINTS")      return "Нет свободных очков: нужно больше убийств.";
+        if (c == "NO_POINTS")      return "Нужен уровень пробуждения выше: больше убийств этим предметом.";
         if (c == "NO_MASTER")      return "Рядом нет мастера оружия.";
         if (c == "NOT_CHOSEN")     return "В этом ряду ничего не выбрано.";
         return "Действие недоступно.";
@@ -534,8 +534,9 @@ private:
 
             ItemTalents::ItemState& state = sItemTalentsMgr->EnsureState(player, item);
             AddGossipItemFor(player, GOSSIP_ICON_CHAT,
-                Acore::StringFormat("{} - убийств: {}, свободных очков: {}",
-                    item->GetTemplate()->Name1, state.kills, sItemTalentsMgr->FreePoints(state)),
+                Acore::StringFormat("{} - убийств: {}, уровень пробуждения: {}",
+                    item->GetTemplate()->Name1, state.kills,
+                    sItemTalentsMgr->EarnedPoints(state.kills)),
                 ITEM_TALENTS_GOSSIP_SENDER, MakeAction(OP_ITEM, slot));
             ++shown;
         }
@@ -569,10 +570,10 @@ private:
 
         // Шапка-строка (клик просто обновляет меню)
         uint32 const nextNeed = sItemTalentsMgr->NextPointNeed(state.kills);
-        std::string header = Acore::StringFormat("{}: убийств {}, свободных очков {}",
-            proto->Name1, state.kills, sItemTalentsMgr->FreePoints(state));
+        std::string header = Acore::StringFormat("{}: убийств {}, уровень пробуждения {} из 5",
+            proto->Name1, state.kills, sItemTalentsMgr->EarnedPoints(state.kills));
         if (nextNeed)
-            header += Acore::StringFormat(" (след. очко: {})", nextNeed);
+            header += Acore::StringFormat(" (след. уровень: {} убийств)", nextNeed);
         AddGossipItemFor(player, GOSSIP_ICON_CHAT, header,
             ITEM_TALENTS_GOSSIP_SENDER, MakeAction(OP_ITEM, equipSlot));
 
@@ -601,6 +602,11 @@ private:
             else if (!sItemTalentsMgr->IsRowSelectable(proto, row))
                 AddGossipItemFor(player, GOSSIP_ICON_CHAT,
                     Acore::StringFormat("Ряд {} ({}): скоро", row, RowName(row)),
+                    ITEM_TALENTS_GOSSIP_SENDER, MakeAction(OP_ITEM, equipSlot));
+            else if (sItemTalentsMgr->EarnedPoints(state.kills) < row)
+                AddGossipItemFor(player, GOSSIP_ICON_CHAT,
+                    Acore::StringFormat("Ряд {} ({}): нужен уровень пробуждения {} ({} убийств)",
+                        row, RowName(row), row, sItemTalentsMgr->GetRowThreshold(row)),
                     ITEM_TALENTS_GOSSIP_SENDER, MakeAction(OP_ITEM, equipSlot));
             else
                 AddGossipItemFor(player, GOSSIP_ICON_INTERACT_1,
@@ -635,9 +641,11 @@ private:
 
         ClearGossipMenuFor(player);
 
-        if (!sItemTalentsMgr->FreePoints(state))
+        if (sItemTalentsMgr->EarnedPoints(state.kills) < row)
             AddGossipItemFor(player, GOSSIP_ICON_CHAT,
-                "Нет свободных очков: нужно больше убийств с этим предметом.",
+                Acore::StringFormat(
+                    "Нужен уровень пробуждения {} ({} убийств этим предметом).",
+                    row, sItemTalentsMgr->GetRowThreshold(row)),
                 ITEM_TALENTS_GOSSIP_SENDER, MakeAction(OP_ITEM, equipSlot));
 
         // Ряд 5 (именной И generic-проки) роллится без качества - "Обычный"
@@ -780,7 +788,7 @@ private:
 
         handler->PSendSysMessage("ITALENT:HDR:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
             item->GetGUID().GetCounter(), proto->ItemLevel, proto->Quality, *pool, rowsOpen,
-            nearMaster, state.kills, sItemTalentsMgr->FreePoints(state),
+            nearMaster, state.kills, sItemTalentsMgr->EarnedPoints(state.kills),
             sItemTalentsMgr->NextPointNeed(state.kills), baseEpic);
 
         for (uint8 row = 1; row <= ItemTalents::MAX_ROWS; ++row)
@@ -936,7 +944,7 @@ private:
             // "Пробуждён" в тултипе предмета
             handler->PSendSysMessage("ITALENT:ITEM:{}:{}:{}:{}:{}:{}:{}:{}",
                 slot + 1, item->GetGUID().GetCounter(), *pool, proto->Quality,
-                state.kills, sItemTalentsMgr->FreePoints(state),
+                state.kills, sItemTalentsMgr->EarnedPoints(state.kills),
                 ItemTalentsMgr::SpentPoints(state), proto->Name1);
         }
 

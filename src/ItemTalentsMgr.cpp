@@ -957,6 +957,11 @@ uint32 ItemTalentsMgr::FreePoints(ItemState const& state) const
     return earned > spent ? earned - spent : 0;
 }
 
+uint32 ItemTalentsMgr::GetRowThreshold(uint8 row) const
+{
+    return (row >= 1 && row <= _cumThresholds.size()) ? _cumThresholds[row - 1] : 0;
+}
+
 uint32 ItemTalentsMgr::NextPointNeed(uint32 kills) const
 {
     for (uint32 threshold : _cumThresholds)
@@ -1785,7 +1790,9 @@ char const* ItemTalentsMgr::TryChoose(Player* player, Item* item, uint8 row, uin
     if (state.rows[row - 1])
         return "ALREADY_CHOSEN";
 
-    if (!FreePoints(state))
+    // Уровни пробуждения (решение 2026-07-06, заменило общие очки):
+    // ряд N доступен только с уровня N (kills >= N-й кумулятивный порог)
+    if (EarnedPoints(state.kills) < row)
         return "NO_POINTS";
 
     // Госсип у мастера пропускает проверку радиуса - игрок и так у НПЦ

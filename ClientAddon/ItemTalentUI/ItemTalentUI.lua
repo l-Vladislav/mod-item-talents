@@ -496,13 +496,20 @@ local function NodeOnEnter(self)
             GameTooltip:AddLine("ПКМ или режим сброса: сбросить ряд (бесплатно)", 0.65, 0.66, 0.72)
         end
     elseif state == "avail" then
-        GameTooltip:AddLine("Доступно: клик для выбора (стоит 1 очко)", 0.62, 0.90, 0.36)
+        GameTooltip:AddLine("Доступно: клик для выбора", 0.62, 0.90, 0.36)
         if current.nearMaster ~= 1 then
             GameTooltip:AddLine("Выбор - только рядом с мастером оружия", 1.0, 0.35, 0.35)
         end
     elseif state == "open" then
-        GameTooltip:AddLine(string.format("Ряд открыт - нет свободных очков (до очка: %d убийств)",
-            math.max(0, (current.nextNeed or 0) - (current.kills or 0))), 0.79, 0.66, 0.29)
+        if row == (current.level or 0) + 1 then
+            GameTooltip:AddLine(string.format(
+                "Нужен уровень пробуждения %d (до него: %d убийств)",
+                row, math.max(0, (current.nextNeed or 0) - (current.kills or 0))),
+                0.79, 0.66, 0.29)
+        else
+            GameTooltip:AddLine(string.format("Нужен уровень пробуждения %d", row),
+                0.79, 0.66, 0.29)
+        end
     elseif state == "dim" then
         local chosenOpt = current.rows[row].opts[current.rows[row].chosen]
         GameTooltip:AddLine("В этом ряду выбрано: " .. (chosenOpt and chosenOpt.name or "?"),
@@ -549,8 +556,9 @@ local function NodeOnClick(self, button)
     end
 
     if state == "open" then
-        hint:SetText(string.format("Нет свободных очков - до следующего очка %d убийств.",
-            math.max(0, (current.nextNeed or 0) - (current.kills or 0))))
+        hint:SetText(string.format(
+            "Ряд %d откроется на уровне пробуждения %d - убивайте с этим предметом.",
+            row, row))
         return
     end
 
@@ -582,8 +590,8 @@ local function NodeOnClick(self, button)
     end
     if opt then
         local guid, r, c = current.guid, row, choice
-        AskConfirm(string.format("Выбрать |cffffd100%s|r?\n%s\n\nБудет потрачено 1 очко таланта."
-            .. "\nСбросить можно бесплатно у мастера оружия.",
+        AskConfirm(string.format("Выбрать |cffffd100%s|r?\n%s\n\n"
+            .. "Сбросить можно бесплатно у мастера оружия.",
             opt.name, EffectDesc(opt.effect, opt.value, opt.name)), function()
             SendCmd(string.format(".itemtalent choose %d %d %d", guid, r, c))
         end)
@@ -773,14 +781,14 @@ local function Render()
         _G["ITEM_QUALITY" .. current.quality .. "_DESC"] or "?", current.ilvl,
         current.kills))
 
-    xpLabel:SetText(string.format("Очки таланта: |cffffd100%d|r", current.freePts))
+    xpLabel:SetText(string.format("Уровень пробуждения: |cffffd100%d|r из 5", current.level))
     if current.nextNeed > 0 then
-        xpRight:SetText(string.format("до следующего очка: %d / %d убийств",
-            current.kills, current.nextNeed))
+        xpRight:SetText(string.format("до уровня %d: %d / %d убийств",
+            current.level + 1, current.kills, current.nextNeed))
         xpBar:SetMinMaxValues(0, current.nextNeed)
         xpBar:SetValue(math.min(current.kills, current.nextNeed))
     else
-        xpRight:SetText("предмет полностью прокачан")
+        xpRight:SetText("предмет полностью пробуждён")
         xpBar:SetMinMaxValues(0, 1)
         xpBar:SetValue(1)
     end
@@ -815,10 +823,10 @@ local function Render()
                 state = "chosen"
             elseif rowData.chosen > 0 then
                 state = "dim"
-            elseif current.freePts > 0 then
+            elseif current.level >= row then
                 state = "avail"
             else
-                state = "open"
+                state = "open" -- ряд ждёт свой уровень пробуждения
             end
             SetNodeState(btn, state, opt and opt.quality or 0)
         end
@@ -947,7 +955,10 @@ local function ParseLine(msg)
         pending = {
             guid = tonumber(guid), ilvl = tonumber(ilvl), quality = tonumber(quality),
             pool = pool, rowsOpen = tonumber(rowsOpen), nearMaster = tonumber(nearMaster),
-            kills = tonumber(kills), freePts = tonumber(freePts), nextNeed = tonumber(nextNeed),
+            kills = tonumber(kills),
+            -- поле протокола прежнее, но с 2026-07-06 это УРОВЕНЬ пробуждения
+            -- (0..5): ряд N открывается только с уровня N
+            level = tonumber(freePts), nextNeed = tonumber(nextNeed),
             baseEpic = baseEpic and tonumber(baseEpic) or 1,
             rows = {},
         }
@@ -975,12 +986,12 @@ local function ParseLine(msg)
     end
 
     -- ITEM-строки ответа list: состояния надетых предметов для тултипов
-    local iSlot, iKills, iFree, iSpent =
+    local iSlot, iKills, iLevel, iSpent =
         msg:match("^ITALENT:ITEM:(%d+):%d+:%a:%d+:(%d+):(%d+):(%d+):")
     if iSlot then
         listBuild = listBuild or {}
         listBuild[tonumber(iSlot)] = {
-            kills = tonumber(iKills), free = tonumber(iFree), spent = tonumber(iSpent),
+            kills = tonumber(iKills), level = tonumber(iLevel), spent = tonumber(iSpent),
         }
         return true
     end
@@ -1017,10 +1028,10 @@ hooksecurefunc(GameTooltip, "SetInventoryItem", function(tip, unit, slot)
     if not st then return end
     if st.spent > 0 then
         tip:AddLine(string.format("Пробуждён: %d из 5", st.spent), 1.0, 0.82, 0.0)
-        if st.free > 0 then
-            tip:AddLine("Есть свободное очко таланта!", 0.55, 0.95, 0.35)
+        if (st.level or 0) > st.spent then
+            tip:AddLine("Доступен новый уровень пробуждения!", 0.55, 0.95, 0.35)
         end
-    elseif st.free > 0 then
+    elseif (st.level or 0) > 0 then
         tip:AddLine("Готов к пробуждению!", 0.55, 0.95, 0.35)
     else
         tip:AddLine(string.format("Пробуждение: убийств %d", st.kills), 0.6, 0.62, 0.7)

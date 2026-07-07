@@ -316,7 +316,9 @@ public:
         Player* player);
 
     // ---- очки ----
-    [[nodiscard]] uint32 EarnedPoints(uint32 kills) const;
+    [[nodiscard]] uint32 EarnedPoints(uint32 kills) const; // = уровень пробуждения 0..5
+    // Кумулятивный порог убийств для уровня/ряда row (0, если ряда нет в конфиге)
+    [[nodiscard]] uint32 GetRowThreshold(uint8 row) const;
     static uint32 SpentPoints(ItemTalents::ItemState const& state);
     [[nodiscard]] uint32 FreePoints(ItemTalents::ItemState const& state) const;
     // кумулятивный порог следующего очка; 0 = все очки уже заработаны
