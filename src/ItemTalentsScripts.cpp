@@ -802,7 +802,10 @@ private:
         ItemTalents::ItemState& state = sItemTalentsMgr->EnsureState(player, item);
 
         uint8 const rowsOpen = sItemTalentsMgr->RowsOpenForItem(proto);
-        uint8 const nearMaster = sItemTalentsMgr->IsNearMaster(player) ? 1 : 0;
+        // Требование "рядом с мастером оружия" снято (решение 2026-07-07):
+        // выбор/сброс доступны отовсюду. Всегда 1 - чтобы аддон не гейтил UI
+        // (и без лишних 11x FindNearestCreature на каждый info-запрос).
+        uint8 const nearMaster = 1;
         // 10-е поле baseEpic: ряд 5 доступен предмету (базовый эпик или
         // именной набор - у именных тоже 1); см. шапку файла
         uint8 const baseEpic = (sItemTalentsMgr->IsBaseEpic(proto)
@@ -911,9 +914,10 @@ private:
         Player* player = handler->GetSession()->GetPlayer();
         Item* item = GetItemByGuidLow(player, itemGuidLow);
 
-        // Вся валидация/запись/привязка - в общем с госсипом хелпере
+        // Вся валидация/запись/привязка - в общем с госсипом хелпере.
+        // requireNearMaster=false: требование близости мастера снято (2026-07-07)
         if (char const* error = sItemTalentsMgr->TryChoose(player, item, row, slot,
-            /*requireNearMaster=*/true))
+            /*requireNearMaster=*/false))
         {
             SendError(handler, error);
             return true;
@@ -931,7 +935,7 @@ private:
         Item* item = GetItemByGuidLow(player, itemGuidLow);
 
         if (char const* error = sItemTalentsMgr->TryReset(player, item, row,
-            /*requireNearMaster=*/true))
+            /*requireNearMaster=*/false))
         {
             SendError(handler, error);
             return true;
