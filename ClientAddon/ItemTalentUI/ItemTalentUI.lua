@@ -397,7 +397,7 @@ end
 local TREE_TOP = -164            -- y центра первого ряда
 local ROW_STEP = 70
 local NODE_X = { 250, 345, 440 } -- x центров узлов
-local NODE_SIZE = 40
+local NODE_SIZE = 55
 local LABEL_RIGHT_X = 206        -- правый край подписей рядов
 
 local function NodeCenter(row, choice)
@@ -650,8 +650,8 @@ local function CreateNode(row, choice)
     -- всегда остаётся одной долей отверстия = "мелкой"). scale = ring/53 держит
     -- круг концентричным с центром кнопки; иконка независимо заполняет отверстие.
     local ringSize = NODE_SIZE * 53 / 42   -- внешний круг ≈ размер узла
-    local scale = ringSize / 53
-    local iconSize = NODE_SIZE * 0.74      -- заполняет отверстие кольца
+    local scale = ringSize / 51
+    local iconSize = NODE_SIZE * 0.47      -- заполняет отверстие кольца 0.74
 
     local icon = btn:CreateTexture(nil, "ARTWORK")
     icon:SetWidth(iconSize)
@@ -694,7 +694,7 @@ local function CreateNode(row, choice)
     lock:SetTexture("Interface\\LFGFrame\\UI-LFG-ICON-LOCK")
     lock:SetWidth(14)
     lock:SetHeight(14)
-    lock:SetPoint("BOTTOMRIGHT", 2, -2)
+    lock:SetPoint("BOTTOMRIGHT", -8, 10)
     lock:SetTexCoord(0, 0.71875, 0, 0.875)
     lock:Hide()
     btn.lock = lock
@@ -1183,7 +1183,7 @@ charBtn:SetWidth(32)
 charBtn:SetHeight(32)
 charBtn:SetPoint("TOPLEFT", CharacterFrame, "TOPRIGHT", -33, -114)
 charBtn:SetFrameLevel(CharacterFrame:GetFrameLevel() + 5)
-charBtn:SetNormalTexture("Interface\\Icons\\INV_Sword_31")
+charBtn:SetNormalTexture("Interface\\Icons\\spell_arcane_studentofmagic")
 charBtn:GetNormalTexture():SetTexCoord(0.07, 0.93, 0.07, 0.93)
 charBtn:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")
 
