@@ -187,8 +187,14 @@ end
 -- подтверждает сервер по хешу (.itemtalent sync) при входе в мир:
 -- совпало - кэш свежий, сервер досылает только kills; разошлось
 -- (перки/экипировка изменились или кэш подправили руками) - полный list.
-local function SaveCache()
+-- ТРОТТЛИНГ: сама запись - глубокое копирование всех деревьев infoCache, а
+-- зовётся на каждый info-ответ (клик/авторефреш) -> клиентский подлаг панели.
+-- Реально копируем не чаще раза в 15 сек; force=true (логаут) сбрасывает сразу.
+local lastSaveAt = 0
+local function SaveCache(force)
     if not charKey or not lastHash then return end
+    if not force and GetTime() - lastSaveAt < 15 then return end
+    lastSaveAt = GetTime()
     -- guid ОБЯЗАТЕЛЕН: им панельный кэш (infoCache) ключуется - без него после
     -- логина по SYNC:OK клики не попадают в кэш и снова бьют в сервер.
     local inv, guids = {}, {}
@@ -1214,7 +1220,12 @@ local ev = CreateFrame("Frame")
 ev:RegisterEvent("PLAYER_LOGIN")
 ev:RegisterEvent("PLAYER_ENTERING_WORLD")
 ev:RegisterEvent("UNIT_INVENTORY_CHANGED")
+ev:RegisterEvent("PLAYER_LEAVING_WORLD") -- логаут/релоад: форс-сохранение кэша (обходит троттлинг)
 ev:SetScript("OnEvent", function(self, event, arg1)
+    if event == "PLAYER_LEAVING_WORLD" then
+        SaveCache(true)
+        return
+    end
     if event == "PLAYER_LOGIN" then
         ItemTalentUIDB = ItemTalentUIDB or {}
         if ItemTalentUIDB.pos then
