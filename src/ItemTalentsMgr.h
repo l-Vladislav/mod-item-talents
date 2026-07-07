@@ -515,6 +515,11 @@ private:
     mutable std::unordered_map<uint32, bool> _baseEpicCache;
     mutable int8 _gaTableStatus = 0;
 
+    // Ручные диапазоны entry для ряда 5 (конфиг, стиль ahbot); deny сильнее
+    static bool EntryInRanges(std::vector<std::pair<uint32, uint32>> const& ranges, uint32 entry);
+    std::vector<std::pair<uint32, uint32>> _row5Allow;
+    std::vector<std::pair<uint32, uint32>> _row5Deny;
+
     using OwnerStates = std::unordered_map<ObjectGuid::LowType, ItemTalents::ItemState>;
     // ownerGuidLow -> itemGuidLow -> state; наличие ключа владельца = "кэш загружен"
     std::unordered_map<ObjectGuid::LowType, OwnerStates> _states;

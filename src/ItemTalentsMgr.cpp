@@ -125,6 +125,30 @@ void ItemTalentsMgr::LoadConfig()
         if (Optional<uint32> entry = Acore::StringTo<uint32>(token))
             _masterEntries.push_back(*entry);
 
+    // Ручные диапазоны entry для ряда 5 (стиль ahbot): "100-200,345841,..."
+    auto parseRanges = [](std::string const& value, std::vector<std::pair<uint32, uint32>>& out)
+    {
+        out.clear();
+        for (std::string_view token : Acore::Tokenize(value, ',', false))
+        {
+            size_t const dash = token.find('-');
+            if (dash == std::string_view::npos)
+            {
+                if (Optional<uint32> single = Acore::StringTo<uint32>(token))
+                    out.emplace_back(*single, *single);
+            }
+            else if (Optional<uint32> lo = Acore::StringTo<uint32>(token.substr(0, dash)))
+                if (Optional<uint32> hi = Acore::StringTo<uint32>(token.substr(dash + 1)))
+                    if (*lo <= *hi)
+                        out.emplace_back(*lo, *hi);
+        }
+    };
+    parseRanges(sConfigMgr->GetOption<std::string>("ItemTalents.Row5.AllowEntryRanges", ""),
+        _row5Allow);
+    parseRanges(sConfigMgr->GetOption<std::string>("ItemTalents.Row5.DenyEntryRanges", ""),
+        _row5Deny);
+    _baseEpicCache.clear(); // конфиг мог поменять вердикты
+
     // Качество ролла: веса выпадения (Обычный/Отличный/Совершенный) и
     // множители значения перка. Кол-во != 3 -> дефолты.
     _qualityChances = { 70.0, 25.0, 5.0 };
@@ -480,7 +504,17 @@ ItemTalents::NamedDef const* ItemTalentsMgr::GetNamedDef(uint32 itemEntry, uint8
 
 bool ItemTalentsMgr::IsBaseEpic(ItemTemplate const* proto) const
 {
-    if (!proto || proto->Quality != ITEM_QUALITY_EPIC)
+    if (!proto)
+        return false;
+
+    // Ручные диапазоны из конфига (стиль ahbot) сильнее любых проверок:
+    // deny запрещает ряд 5, allow принудительно разрешает.
+    if (EntryInRanges(_row5Deny, proto->ItemId))
+        return false;
+    if (EntryInRanges(_row5Allow, proto->ItemId))
+        return true;
+
+    if (proto->Quality != ITEM_QUALITY_EPIC)
         return false;
 
     auto cached = _baseEpicCache.find(proto->ItemId);
@@ -501,31 +535,28 @@ bool ItemTalentsMgr::IsBaseEpic(ItemTemplate const* proto) const
     bool baseEpic = true;
     if (_gaTableStatus > 0)
     {
-        // Идём по prev_entry до корня цепочки (кап на глубину - защита от
-        // случайного цикла в данных); entry вне цепочки - сам себе корень.
-        uint32 current = proto->ItemId;
-        for (uint8 hops = 0; hops < 16; ++hops)
-        {
-            QueryResult result = WorldDatabase.Query(
-                "SELECT prev_entry FROM item_upgrade_chain WHERE entry = {}", current);
-            if (!result)
-                break; // не в цепочке: current - корень
-
-            uint32 const prev = result->Fetch()[0].Get<uint32>();
-            if (!prev || prev == current)
-                break; // корень цепочки
-            current = prev;
-        }
-
-        if (current != proto->ItemId)
-        {
-            ItemTemplate const* root = sObjectMgr->GetItemTemplate(current);
-            baseEpic = root && root->Quality >= ITEM_QUALITY_EPIC;
-        }
+        // Цепочка ключуется ИСХОДНЫМ предметом (entry -> next_entry):
+        // вершина (эпик-копия) собственной строки НЕ имеет, поэтому ищем
+        // предмет в колонке next_entry - нашёлся значит это GA-копия,
+        // а копия базовым эпиком не бывает (эпик-базы GA не апгрейдит).
+        QueryResult result = WorldDatabase.Query(
+            "SELECT 1 FROM item_upgrade_chain WHERE next_entry = {} LIMIT 1",
+            proto->ItemId);
+        baseEpic = !result;
     }
 
     _baseEpicCache[proto->ItemId] = baseEpic;
     return baseEpic;
+}
+
+bool ItemTalentsMgr::EntryInRanges(std::vector<std::pair<uint32, uint32>> const& ranges,
+    uint32 entry)
+{
+    for (auto const& [lo, hi] : ranges)
+        if (entry >= lo && entry <= hi)
+            return true;
+
+    return false;
 }
 
 uint8 ItemTalentsMgr::RowsOpenForItem(ItemTemplate const* proto) const
