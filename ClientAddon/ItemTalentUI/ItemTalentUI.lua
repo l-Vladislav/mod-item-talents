@@ -157,6 +157,7 @@ local listBuild = nil    -- накапливаемый ответ list
 local listReqAt = 0      -- троттлинг запросов list
 local listAt = nil       -- время отложенного запроса list
 local syncAt = nil       -- время отложенной верификации кэша (.itemtalent sync)
+local syncPending = false -- ждём ответ на .itemtalent sync (для инвалидации деревьев)
 local lastHash = nil     -- хеш перк-состояния из последней строки ITALENT:HASH
 local charKey = nil      -- "Realm-Name": ключ локального кэша в ItemTalentUIDB.chars
 
@@ -187,12 +188,21 @@ end
 -- (перки/экипировка изменились или кэш подправили руками) - полный list.
 local function SaveCache()
     if not charKey or not lastHash then return end
-    local inv = {}
+    -- guid ОБЯЗАТЕЛЕН: им панельный кэш (infoCache) ключуется - без него после
+    -- логина по SYNC:OK клики не попадают в кэш и снова бьют в сервер.
+    local inv, guids = {}, {}
     for slot, st in pairs(invCache) do
-        inv[slot] = { kills = st.kills, level = st.level, spent = st.spent }
+        inv[slot] = { guid = st.guid, kills = st.kills, level = st.level, spent = st.spent }
+        if st.guid then guids[st.guid] = true end
+    end
+    -- Полные деревья надетых предметов тоже персистим (ключ = GUID): при
+    -- совпадении хеша на логине панель рисуется из них БЕЗ единого запроса.
+    local trees = {}
+    for guid, block in pairs(infoCache) do
+        if guids[guid] then trees[guid] = block end
     end
     ItemTalentUIDB.chars = ItemTalentUIDB.chars or {}
-    ItemTalentUIDB.chars[charKey] = { hash = lastHash, inv = inv }
+    ItemTalentUIDB.chars[charKey] = { hash = lastHash, inv = inv, trees = trees }
 end
 
 local function EffectMeta(effect, name)
@@ -236,6 +246,11 @@ f:SetBackdrop({
     insets = { left = 11, right = 12, top = 12, bottom = 11 },
 })
 f:Hide()
+
+-- Версия аддона в правом нижнем углу панели (для быстрой сверки что загружено)
+local verText = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+verText:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -14, 12)
+verText:SetText("v" .. (GetAddOnMetadata and GetAddOnMetadata("ItemTalentUI", "Version") or "?"))
 tinsert(UISpecialFrames, "ItemTalentUIFrame")
 
 local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
@@ -916,7 +931,12 @@ SelectSlot = function(inv)
     -- .itemtalent info шлём ТОЛЬКО если блок ещё ни разу не грузился (list
     -- даёт лишь сводку kills/level, но не сами роллы/выборы рядов).
     local st = invCache[inv]
-    local cached = st and st.guid and infoCache[st.guid]
+    local guid = st and st.guid
+    local cached = guid and infoCache[guid]
+    if ItemTalentUIDB and ItemTalentUIDB.debug then
+        Msg(string.format("слот %d: invCache=%s guid=%s дерево=%s",
+            inv, st and "да" or "НЕТ", tostring(guid), cached and "ЕСТЬ->кэш" or "нет->сервер"))
+    end
     if cached then
         current = cached
         lastInfoAt = GetTime()
@@ -980,9 +1000,17 @@ local function ParseLine(msg)
                 Render()
             end
             pending = nil
+            SaveCache() -- персистим выученное дерево сразу (no-op пока нет lastHash)
         elseif listBuild then
             invCache = listBuild
             listBuild = nil
+            -- Полный list в ответ на sync = хеш РАЗОШЁЛСЯ: персистнутые деревья
+            -- могли устареть, сбрасываем (обычные list-обновления не трогают
+            -- infoCache - там ключ по GUID сам отсекает сменившиеся предметы).
+            if syncPending then
+                infoCache = {}
+                syncPending = false
+            end
             SaveCache()
         end
         return true
@@ -998,6 +1026,7 @@ local function ParseLine(msg)
     -- Кэш подтверждён: обновляем только kills (в хеш они не входят)
     local syncKills = msg:match("^ITALENT:SYNC:OK:?(.*)$")
     if syncKills then
+        syncPending = false -- хеш совпал: персистнутые деревья валидны
         for slot, kills in syncKills:gmatch("(%d+)=(%d+)") do
             local st = invCache[tonumber(slot)]
             if st then st.kills = tonumber(kills) end
@@ -1198,14 +1227,20 @@ ev:SetScript("OnEvent", function(self, event, arg1)
     elseif event == "PLAYER_ENTERING_WORLD" then
         charKey = charKey or (GetRealmName() .. "-" .. UnitName("player"))
         local saved = ItemTalentUIDB.chars and ItemTalentUIDB.chars[charKey]
-        if saved and saved.hash and saved.inv then
-            -- Тултипы сразу из локального кэша; сервер подтвердит его хешем
-            -- (совпало - пришлёт только kills, нет - полный list)
+        -- Требуем saved.trees: старый формат (v<=0.4) без деревьев/guid не даёт
+        -- панельному кэшу ключей - для него уходим в полный list (ниже).
+        if saved and saved.hash and saved.inv and saved.trees then
+            -- Тултипы И деревья талантов сразу из локального кэша; сервер
+            -- подтвердит хешем (совпало - только kills, панель без запросов;
+            -- нет - полный list + сброс деревьев как устаревших).
             invCache = {}
             for slot, st in pairs(saved.inv) do
-                invCache[slot] = { kills = st.kills, level = st.level, spent = st.spent }
+                invCache[slot] = { guid = st.guid, kills = st.kills,
+                    level = st.level, spent = st.spent }
             end
+            infoCache = saved.trees or {}
             lastHash = saved.hash
+            syncPending = true
             syncAt = GetTime() + 8
         else
             listAt = GetTime() + 8 -- прогреть кэш тултипов после входа в мир
@@ -1228,6 +1263,12 @@ end)
 SLASH_ITEMTALENTUI1 = "/itu"
 SLASH_ITEMTALENTUI2 = "/itemtalent"
 SlashCmdList["ITEMTALENTUI"] = function(arg)
+    if arg == "debug" then
+        ItemTalentUIDB = ItemTalentUIDB or {}
+        ItemTalentUIDB.debug = not ItemTalentUIDB.debug
+        Msg("дебаг " .. (ItemTalentUIDB.debug and "ВКЛ (клики покажут кэш/сервер)" or "выкл"))
+        return
+    end
     local inv = tonumber(arg)
     if inv and inv >= 1 and inv <= 19 then
         if not f:IsShown() then f:Show(); UpdateSlotButtons() end
