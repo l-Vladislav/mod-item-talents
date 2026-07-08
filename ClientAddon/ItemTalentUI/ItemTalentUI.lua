@@ -837,12 +837,19 @@ local function Render()
         _G["ITEM_QUALITY" .. current.quality .. "_DESC"] or "?", current.ilvl,
         current.kills))
 
-    xpLabel:SetText(string.format("Уровень пробуждения: |cffffd100%d|r из 5", current.level))
+    -- Потолок уровня = rowsOpen (по качеству предмета): белый макс 1, ... эпик 5
+    local cap = current.rowsOpen or 5
+    xpLabel:SetText(string.format("Уровень пробуждения: |cffffd100%d|r из %d",
+        current.level, cap))
     if current.nextNeed > 0 then
         xpRight:SetText(string.format("до уровня %d: %d / %d убийств",
             current.level + 1, current.kills, current.nextNeed))
         xpBar:SetMinMaxValues(0, current.nextNeed)
         xpBar:SetValue(math.min(current.kills, current.nextNeed))
+    elseif cap < 5 then
+        xpRight:SetText("предел качества - улучшите предмет")
+        xpBar:SetMinMaxValues(0, 1)
+        xpBar:SetValue(1)
     else
         xpRight:SetText("предмет полностью пробуждён")
         xpBar:SetMinMaxValues(0, 1)

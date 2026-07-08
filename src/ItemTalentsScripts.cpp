@@ -618,13 +618,17 @@ private:
         ClearGossipMenuFor(player);
 
         // Шапка-строка (клик просто обновляет меню); kills - счётчик ВНУТРИ
-        // уровня, nextNeed - сегмент следующего уровня (0 = уровень 5)
-        uint32 const nextNeed = sItemTalentsMgr->NextLevelNeed(state.level);
-        std::string header = Acore::StringFormat("{}: уровень пробуждения {} из 5",
-            proto->Name1, state.level);
+        // уровня, nextNeed - сегмент следующего уровня (0 = потолок качества
+        // rowsOpen или уровень 5)
+        uint32 const nextNeed = state.level >= rowsOpen
+            ? 0u : sItemTalentsMgr->NextLevelNeed(state.level);
+        std::string header = Acore::StringFormat("{}: уровень пробуждения {} из {}",
+            proto->Name1, state.level, rowsOpen);
         if (nextNeed)
             header += Acore::StringFormat(" (след. уровень: {} / {} убийств)",
                 state.kills, nextNeed);
+        else if (rowsOpen < ItemTalents::MAX_ROWS)
+            header += " (предел качества - улучшите предмет)";
         AddGossipItemFor(player, GOSSIP_ICON_CHAT, header,
             ITEM_TALENTS_GOSSIP_SENDER, MakeAction(OP_ITEM, equipSlot));
 
@@ -856,11 +860,13 @@ private:
             || sItemTalentsMgr->HasNamedSet(proto->ItemId)) ? 1 : 0;
 
         // kills = счётчик внутри уровня, freePts = уровень (state.level),
-        // nextNeed = сегмент следующего уровня; форма протокола не менялась
+        // nextNeed = сегмент следующего уровня, 0 = достигнут потолок качества
+        // (rowsOpen) или уровень 5; форма протокола не менялась
+        uint32 const nextNeed = state.level >= rowsOpen
+            ? 0u : sItemTalentsMgr->NextLevelNeed(state.level);
         handler->PSendSysMessage("ITALENT:HDR:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
             item->GetGUID().GetCounter(), proto->ItemLevel, proto->Quality, *pool, rowsOpen,
-            nearMaster, state.kills, state.level,
-            sItemTalentsMgr->NextLevelNeed(state.level), baseEpic);
+            nearMaster, state.kills, state.level, nextNeed, baseEpic);
 
         for (uint8 row = 1; row <= ItemTalents::MAX_ROWS; ++row)
         {

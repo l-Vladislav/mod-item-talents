@@ -854,6 +854,17 @@ ItemState& ItemTalentsMgr::EnsureState(Player* player, Item* item)
             "UPDATE item_talents SET item_entry = {} WHERE item_guid = {}", curEntry, itemGuid);
     }
 
+    // Клампим уровень к потолку качества (легаси-предметы могли перерасти
+    // потолок, пока кап не действовал): лишний уровень был бесполезен (ряды
+    // всё равно закрыты качеством), излишек убийств сгорает.
+    uint8 const maxLevel = RowsOpenForItem(item->GetTemplate());
+    if (st.level > maxLevel)
+    {
+        st.level = maxLevel;
+        st.kills = 0;
+        st.dirty = true;
+    }
+
     // Ленивый ролл слотов (DESIGN "Роллы перков и качество"): только реальным
     // игрокам - предметы ботов не роллим.
     if (!ShouldIgnorePlayer(player))
@@ -986,10 +997,20 @@ void ItemTalentsMgr::TransferItem(ObjectGuid::LowType oldItemGuid,
             return;
     }
 
+    // Новый entry: у апгрейженного предмета качество (и entry) иное. БЕЗ
+    // перештамповки item_entry защита от переиспользования GUID приняла бы
+    // апгрейд за чужой GUID и СБРОСИЛА бы таланты (регрессия item_entry-guard).
+    uint32 newEntry = 0;
+    if (player)
+        if (Item* newItem = player->GetItemByGuid(
+            ObjectGuid::Create<HighGuid::Item>(newItemGuid)))
+            newEntry = newItem->GetEntry();
+
     // БД синхронно: сразу после GA-свопа модуль может сделать точечный SELECT
     // нового GUID (EnsureState) - перенос обязан быть уже виден.
     CharacterDatabase.DirectExecute(
-        "UPDATE item_talents SET item_guid = {} WHERE item_guid = {}", newItemGuid, oldItemGuid);
+        "UPDATE item_talents SET item_guid = {}, item_entry = {} WHERE item_guid = {}",
+        newItemGuid, newEntry, oldItemGuid);
     CharacterDatabase.DirectExecute(
         "UPDATE item_talent_rolls SET item_guid = {} WHERE item_guid = {}",
         newItemGuid, oldItemGuid);
@@ -1008,6 +1029,7 @@ void ItemTalentsMgr::TransferItem(ObjectGuid::LowType oldItemGuid,
         return;
 
     node.key() = newItemGuid;
+    node.mapped().entry = newEntry; // штамп нового предмета и в кэше
     ownerItr->second.insert(std::move(node));
 }
 
@@ -1058,6 +1080,15 @@ void ItemTalentsMgr::AddKill(Player* player)
 
         // _eliteMultiplier - задел на будущее (DESIGN: пока всегда +1)
         ItemState& state = EnsureState(player, item);
+
+        // Потолок уровня по КАЧЕСТВУ предмета (решение 2026-07-07): белый
+        // макс 1, зелёный 2, ... базовый эпик 5. На потолке килы не копим -
+        // дальше растить уровень можно только подняв качество (GA-апгрейд
+        // переносит уровень, счёт следующего продолжится с нуля).
+        uint8 const maxLevel = RowsOpenForItem(item->GetTemplate());
+        if (state.level >= maxLevel)
+            continue;
+
         ++state.kills;
         state.dirty = true;
 
@@ -1076,10 +1107,12 @@ void ItemTalentsMgr::AddKill(Player* player)
         // Async безопасен: и этот INSERT, и FlushKills пишут АБСОЛЮТНЫЕ
         // значения из кэша - порядок применения не важен.
         CharacterDatabase.Execute(
-            "INSERT INTO item_talents (item_guid, owner_guid, kills, level) "
-            "VALUES ({}, {}, 0, {}) ON DUPLICATE KEY UPDATE kills = VALUES(kills), "
-            "level = VALUES(level), owner_guid = VALUES(owner_guid)",
-            item->GetGUID().GetCounter(), player->GetGUID().GetCounter(), state.level);
+            "INSERT INTO item_talents (item_guid, owner_guid, kills, level, item_entry) "
+            "VALUES ({}, {}, 0, {}, {}) ON DUPLICATE KEY UPDATE kills = VALUES(kills), "
+            "level = VALUES(level), owner_guid = VALUES(owner_guid), "
+            "item_entry = VALUES(item_entry)",
+            item->GetGUID().GetCounter(), player->GetGUID().GetCounter(), state.level,
+            state.entry);
     }
 }
 
