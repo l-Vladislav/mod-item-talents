@@ -484,9 +484,10 @@ local function SetNodeState(btn, state, quality)
     local dim = 1.0
 
     if state == "chosen" then
-        glow:SetVertexColor(qc.r, qc.g, qc.b)  -- свечение = цвет качества узла
-        glow:SetAlpha(0.65)
-        glow:Show()
+        -- Выбранный талант: яркое кольцо качества (dim=1.0), но БЕЗ свечения -
+        -- свечение приберегаем для реально доступного к выбору узла, иначе при
+        -- открытии нового уровня уже потраченные ряды тоже "подсвечиваются"
+        -- (жалоба 2026-07-07). Виден по полной яркости кольца/иконки.
     elseif state == "avail" then
         glow:SetVertexColor(qc.r, qc.g, qc.b)  -- свечение = цвет качества узла
         glow:SetAlpha(0.5)
