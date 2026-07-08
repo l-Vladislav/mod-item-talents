@@ -301,6 +301,19 @@ local function UpdateSlotButtons()
         else
             btn.sel:Hide()
         end
+
+        -- Сияние, если у надетого предмета есть доступное, но не вложенное
+        -- очко (открытый качеством+уровнем ряд без выбора): level - spent > 0.
+        local st = invCache[def.inv]
+        local hasPoint = tex and st and st.level and st.spent
+            and (st.level - st.spent) > 0
+        if hasPoint then
+            btn.glow:Show()
+            btn.glowAnim:Play()
+        else
+            btn.glow:Hide()
+            btn.glowAnim:Stop()
+        end
     end
 end
 
@@ -317,6 +330,23 @@ local function CreateSlotButton(def)
     btn.sel:SetBlendMode("ADD")
     btn.sel:SetAllPoints()
     btn.sel:Hide()
+
+    -- Сияние "есть доступное очко перка" (пульсирует): канонический глоу
+    -- кнопки действия - золотой, квадратный, ложится на квадратный слот.
+    btn.glow = btn:CreateTexture(nil, "OVERLAY")
+    btn.glow:SetTexture("Interface\\Buttons\\UI-ActionButton-Border")
+    btn.glow:SetBlendMode("ADD")
+    btn.glow:SetVertexColor(1.0, 0.82, 0.0)
+    btn.glow:SetPoint("CENTER")
+    btn.glow:SetWidth(62)
+    btn.glow:SetHeight(62)
+    btn.glow:Hide()
+    local ga = btn.glow:CreateAnimationGroup()
+    local a = ga:CreateAnimation("Alpha")
+    a:SetChange(-0.5)
+    a:SetDuration(0.9)
+    ga:SetLooping("BOUNCE")
+    btn.glowAnim = ga
 
     btn:SetScript("OnClick", function(self) SelectSlot(self.def.inv) end)
     btn:SetScript("OnEnter", function(self)
@@ -1031,6 +1061,20 @@ local function ParseLine(msg)
                 current = pending
                 lastInfoAt = GetTime()
                 Render()
+                -- Свежий блок несёт актуальные level/выборы - обновим слот-кэш
+                -- (spent = число выбранных рядов) и сияние доступных очков
+                -- после выбора/сброса, не дожидаясь полного list.
+                if selectedInv then
+                    local spent = 0
+                    for r = 1, 5 do
+                        if pending.rows[r] and pending.rows[r].chosen > 0 then
+                            spent = spent + 1
+                        end
+                    end
+                    invCache[selectedInv] = { guid = pending.guid, kills = pending.kills,
+                        level = pending.level, spent = spent }
+                    UpdateSlotButtons()
+                end
             end
             pending = nil
             SaveCache() -- персистим выученное дерево сразу (no-op пока нет lastHash)
@@ -1045,6 +1089,8 @@ local function ParseLine(msg)
                 syncPending = false
             end
             SaveCache()
+            -- Свежие level/spent пришли - пересчитать сияние доступных очков
+            if f:IsShown() then UpdateSlotButtons() end
         end
         return true
     end
