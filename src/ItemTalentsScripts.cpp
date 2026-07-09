@@ -168,6 +168,48 @@ namespace
 
         return FormatDesc(def->descRu, value, chance);
     }
+
+    // ---- пакетная отправка протокольных строк (перф-полировка) ----
+    // Несколько записей "TYPE:..." (БЕЗ префикса ITALENT:) склеиваются табом в
+    // одно SysMessage-сообщение "ITALENT:B:<a>\t<b>\t...". Раньше .itemtalent
+    // info/list слали ~7-22 отдельных пакета; теперь их 2-4. Аддон разбирает
+    // ITALENT:B:..., режет по табу и скармливает каждую запись своему парсеру
+    // строки с восстановленным префиксом ITALENT:. Одиночные ответы (OK/ERR/
+    // SYNC и standalone HASH) не батчатся - шлются как прежде.
+    struct ChunkedSender
+    {
+        ChatHandler* h;
+        std::string buf;
+        static constexpr std::size_t LIMIT = 250; // под лимит чат-строки 3.3.5
+
+        explicit ChunkedSender(ChatHandler* handler) : h(handler) { }
+
+        // piece - запись БЕЗ префикса ITALENT:, напр. "HDR:...", "ROW:1:0",
+        // "END". Таб внутри поля недопустим (он разделитель записей) -
+        // защитно заменяем на пробел (имена RU табов не содержат, но на всякий).
+        void Line(std::string piece)
+        {
+            for (char& c : piece)
+                if (c == '\t')
+                    c = ' ';
+            if (!buf.empty() && buf.size() + 1 + piece.size() > LIMIT)
+                Flush();
+            if (!buf.empty())
+                buf += '\t';
+            buf += piece;
+        }
+
+        void Flush()
+        {
+            if (!buf.empty())
+            {
+                h->PSendSysMessage("ITALENT:B:{}", buf);
+                buf.clear();
+            }
+        }
+
+        ~ChunkedSender() { Flush(); }
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -864,13 +906,16 @@ private:
         // (rowsOpen) или уровень 5; форма протокола не менялась
         uint32 const nextNeed = state.level >= rowsOpen
             ? 0u : sItemTalentsMgr->NextLevelNeed(state.level);
-        handler->PSendSysMessage("ITALENT:HDR:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+        // Батчинг: те же поля/значения, только транспорт (склейка в ITALENT:B).
+        // Деструктор s в конце функции добьёт остаток буфера.
+        ChunkedSender s(handler);
+        s.Line(Acore::StringFormat("HDR:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
             item->GetGUID().GetCounter(), proto->ItemLevel, proto->Quality, *pool, rowsOpen,
-            nearMaster, state.kills, state.level, nextNeed, baseEpic);
+            nearMaster, state.kills, state.level, nextNeed, baseEpic));
 
         for (uint8 row = 1; row <= ItemTalents::MAX_ROWS; ++row)
         {
-            handler->PSendSysMessage("ITALENT:ROW:{}:{}", row, state.rows[row - 1]);
+            s.Line(Acore::StringFormat("ROW:{}:{}", row, state.rows[row - 1]));
             for (uint8 slot = 1; slot <= ItemTalents::MAX_SLOTS; ++slot)
             {
                 ItemTalents::RollSlot const& roll = state.rolls[row - 1][slot - 1];
@@ -879,14 +924,14 @@ private:
 
                 if (ItemTalents::TalentDef const* def =
                     sItemTalentsMgr->GetDefForItem(proto, row, roll.choice))
-                    handler->PSendSysMessage("ITALENT:OPT:{}:{}:{}:{}:{}:{}", row, slot,
+                    s.Line(Acore::StringFormat("OPT:{}:{}:{}:{}:{}:{}", row, slot,
                         def->effect,
                         sItemTalentsMgr->CalcValue(*def, proto->ItemLevel, roll.quality),
-                        roll.quality, def->nameRu);
+                        roll.quality, def->nameRu));
             }
         }
 
-        handler->PSendSysMessage("ITALENT:END");
+        s.Line("END");
     }
 
     static Item* GetItemByGuidLow(Player* player, uint32 itemGuidLow)
@@ -1000,6 +1045,10 @@ private:
     // клиент на END сохраняет локальный кэш вместе с последним полученным хешем.
     static void SendList(ChatHandler* handler, Player* player)
     {
+        // Батчинг: ITEM-строки + HASH + END склеиваются в ITALENT:B (тот же
+        // формат/порядок - HASH после ITEM, END последним). Деструктор s
+        // добьёт остаток буфера при выходе из функции.
+        ChunkedSender s(handler);
         for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
         {
             Item* item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
@@ -1015,14 +1064,14 @@ private:
             // slot+1 = клиентский inv-слот; spent нужен аддону для строки
             // "Пробуждён" в тултипе предмета; kills - счётчик внутри уровня,
             // уровень - state.level (тултип-кэш аддона invCache)
-            handler->PSendSysMessage("ITALENT:ITEM:{}:{}:{}:{}:{}:{}:{}:{}",
+            s.Line(Acore::StringFormat("ITEM:{}:{}:{}:{}:{}:{}:{}:{}",
                 slot + 1, item->GetGUID().GetCounter(), *pool, proto->Quality,
                 state.kills, state.level,
-                ItemTalentsMgr::SpentPoints(state), proto->Name1);
+                ItemTalentsMgr::SpentPoints(state), proto->Name1));
         }
 
-        handler->PSendSysMessage("ITALENT:HASH:{}", sItemTalentsMgr->ComputePerkHash(player));
-        handler->PSendSysMessage("ITALENT:END");
+        s.Line(Acore::StringFormat("HASH:{}", sItemTalentsMgr->ComputePerkHash(player)));
+        s.Line("END");
     }
 
     // list: все надетые предметы системы
