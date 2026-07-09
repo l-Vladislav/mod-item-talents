@@ -335,17 +335,21 @@ public:
             sItemTalentsMgr->PlayItemSound(player, item);
     }
 
-    // DURA_SAVE: N% событий износа предмета с перком пропускается
-    // durability-хук СНЯТ (решение владельца 2026-07-07): вызывался по каждому
-    // надетому предмету на каждый taken-hit (~18x/удар для всех) - лишний
-    // пер-событийный налог. Перк DURA_SAVE поэтому НЕ работает. Если понадобится
-    // вернуть - раскомментировать И (рекомендуется) сначала добавить глобальный
-    // gate "есть ли онлайн активный DURA_SAVE", чтобы обработчик выходил мгновенно,
-    // когда перк никем не используется (иначе вернётся тот же налог).
-    // void OnPlayerDurabilityPointsLoss(Player* player, Item* item, int32& points) override
-    // {
-    //     sItemTalentsMgr->HandleDurabilityLoss(player, item, points);
-    // }
+    // DURA_SAVE: N% событий износа предмета с перком пропускается.
+    // Хук ВОЗВРАЩЁН 2026-07-09 (был снят 2026-07-07 как подозреваемый в
+    // лагах - разбор того же дня показал, что реальный налог был в
+    // playerbots-фан-ауте/чат-протоколах/nemesis-bootstrap, уже пофикшено).
+    // Бот-гейт ShouldIgnorePlayer ставим САМЫМ первым выражением - тот же
+    // паттерн, что в OnAuraApply/OnAuraRemove ниже: событие 18x/удар било по
+    // ВСЕМ игрокам (~1800 ботов в бою), гейт отсекает бота ДО GetPerks/поиска
+    // по item guid, так что для бота это один дешёвый bool-чек и return.
+    void OnPlayerDurabilityPointsLoss(Player* player, Item* item, int32& points) override
+    {
+        if (!player || sItemTalentsMgr->ShouldIgnorePlayer(player))
+            return;
+
+        sItemTalentsMgr->HandleDurabilityLoss(player, item, points);
+    }
 
     // GOLD_XP_PCT (золото): бонус к деньгам с добычи СУЩЕСТВ. Хук идёт до
     // раздачи денег: в группе увеличенный котёл делится на всех - осознанно
