@@ -153,6 +153,7 @@ local popupAction = nil
 
 local invCache = {}      -- [invSlot] = {guid, kills, level, spent} для тултипов (.itemtalent list)
 local infoCache = {}     -- [itemGuid] = разобранный info-блок (+ .at) для мгновенного ре-рендера панели
+local infoReqAt = {}     -- [itemGuid] = время последнего .itemtalent info (троттлинг волатильных kills)
 local listBuild = nil    -- накапливаемый ответ list
 local listReqAt = 0      -- троттлинг запросов list
 local listAt = nil       -- время отложенного запроса list
@@ -786,37 +787,19 @@ end
 -- Футер
 -- ---------------------------------------------------------------------------
 
+-- Кнопки "Закрыть" и "Сбросить ряд" убраны (решение 2026-07-08): закрытие -
+-- крестик сверху / ESC, сброс ряда - ПКМ по выбранному узлу. «Итог»
+-- многострочный: заголовок + по перку на строку (top-anchored, растёт вниз).
 local summary = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-summary:SetPoint("BOTTOMLEFT", 110, 80)
-summary:SetPoint("BOTTOMRIGHT", -24, 80)
+summary:SetPoint("TOPLEFT", f, "BOTTOMLEFT", 110, 108)
+summary:SetPoint("TOPRIGHT", f, "BOTTOMRIGHT", -24, 108)
 summary:SetJustifyH("LEFT")
+summary:SetJustifyV("TOP")
 summary:SetTextColor(0.81, 0.90, 0.66)
 
-local resetBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-resetBtn:SetWidth(140)
-resetBtn:SetHeight(22)
-resetBtn:SetPoint("BOTTOMLEFT", 110, 50)
-resetBtn:SetText("Сбросить ряд")
-resetBtn:SetScript("OnClick", function()
-    if not current then return end
-    if current.nearMaster ~= 1 then
-        hint:SetText("Сброс - только рядом с мастером оружия.")
-        return
-    end
-    resetMode = true
-    hint:SetText("Кликните по золотому узлу ряда, который нужно сбросить.")
-end)
-
-local closeBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-closeBtn:SetWidth(140)
-closeBtn:SetHeight(22)
-closeBtn:SetPoint("BOTTOMRIGHT", -24, 50)
-closeBtn:SetText("Закрыть")
-closeBtn:SetScript("OnClick", function() f:Hide() end)
-
 hint = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-hint:SetPoint("BOTTOMLEFT", 110, 28)
-hint:SetPoint("BOTTOMRIGHT", -24, 28)
+hint:SetPoint("BOTTOMLEFT", 110, 16)
+hint:SetPoint("BOTTOMRIGHT", -24, 16)
 hint:SetJustifyH("LEFT")
 hint:SetTextColor(0.55, 0.57, 0.63)
 
@@ -942,12 +925,13 @@ local function Render()
         end
     end
     if #parts > 0 then
-        summary:SetText("|cffffd100Итог:|r " .. table.concat(parts, " - "))
+        -- Многострочный итог: заголовок + по перку на строку (решение
+        -- 2026-07-08) - в одну строку список не влезал и обрезался
+        summary:SetText("|cffffd100Итог:|r\n" .. table.concat(parts, "\n"))
     else
         summary:SetText("|cffffd100Итог:|r таланты не выбраны")
     end
 
-    resetBtn:SetAlpha(current.nearMaster == 1 and 1 or 0.5)
     RedrawWires()
 end
 
@@ -1005,7 +989,17 @@ SelectSlot = function(inv)
         RenderEmpty("Загрузка...") -- чистим панель, чтобы не висел старый предмет
     end
     lastInfoAt = GetTime()
-    SendCmd(string.format(".itemtalent info inv %d", inv)) -- свежие kills/мастер
+    -- Свежие kills/мастер с сервера. Дерево статично и уже нарисовано из кэша,
+    -- волатильны только kills - поэтому запрос шлём не чаще раза в 3 сек НА
+    -- ПРЕДМЕТ (частые клики по одному слоту больше не бьют в сервер). Если
+    -- кэша по предмету нет (панель на "Загрузка...") - шлём всегда, иначе
+    -- панель зависнет. Пуш свежего info после choose/reset идёт мимо SelectSlot
+    -- (сервер сам досылает), троттлинг его не касается.
+    local now = GetTime()
+    if not cached or not guid or (now - (infoReqAt[guid] or 0)) >= 3 then
+        if guid then infoReqAt[guid] = now end
+        SendCmd(string.format(".itemtalent info inv %d", inv))
+    end
 end
 
 local function ShowPanel()
@@ -1045,6 +1039,19 @@ end
 -- ---------------------------------------------------------------------------
 
 local function ParseLine(msg)
+    -- Пакет (перф): "ITALENT:B:<a>\t<b>\t..." - несколько записей одного
+    -- info/list-ответа склеены сервером в один SysMessage. Режем по табу и
+    -- скармливаем каждую запись этому же парсеру с восстановленным префиксом
+    -- ITALENT:. Одиночные ITALENT:... (OK/ERR/SYNC/standalone HASH) идут
+    -- прежним путём ниже - совместимость сохранена.
+    local body = msg:match("^ITALENT:B:(.+)")
+    if body then
+        for piece in (body .. "\t"):gmatch("(.-)\t") do
+            if piece ~= "" then ParseLine("ITALENT:" .. piece) end
+        end
+        return true
+    end
+
     if msg == "ITALENT:END" then
         if pending then
             pending.maxRow = MAX_IMPLEMENTED_ROW
