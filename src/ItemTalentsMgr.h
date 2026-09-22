@@ -51,7 +51,8 @@ namespace ItemTalents
 {
     constexpr uint8 MAX_ROWS = 5;
     constexpr uint8 MAX_SLOTS = 3;         // роллы-слоты ряда (UI: выбор 1 из 3)
-    constexpr uint8 MAX_MENU_CHOICES = 15; // потолок choice в сиде item_talent_def
+    constexpr uint8 MAX_MENU_CHOICES = 30; // потолок choice в меню ряда (item_talent_def
+                                           // и персональные item_talent_item_def)
     constexpr uint8 NUM_QUALITIES = 3;     // Обычный / Отличный / Совершенный
 
     // Ауры процентных перков ряда 3 (server-side spell_dbc, миграция
@@ -160,6 +161,42 @@ namespace ItemTalents
         int32 tickMs = 0;        // до следующего болта
     };
 
+    // Правило подбора категории (item_talent_category_rule, acore_world):
+    // замена жёсткого GetPool. -1 в поле = "любой"; entryLo/entryHi = 0,0 -
+    // любой entry. Побеждает правило с наибольшим priority.
+    struct CategoryRule
+    {
+        char code = 'A';
+        int16 itemClass = -1;
+        int16 subclass = -1;
+        int16 invType = -1;
+        uint8 qualityMin = 0;
+        uint8 qualityMax = 7;
+        uint32 entryLo = 0;
+        uint32 entryHi = 0;
+        int16 priority = 0;
+    };
+
+    // Настройка ряда (item_talent_row_cfg / item_talent_item_cfg): сколько
+    // вариантов меню реально роллится в 3 слота UI и катается ли качество.
+    struct RowCfg
+    {
+        uint8 rollCount = MAX_SLOTS;
+        bool qualityEnabled = true;
+    };
+
+    // Кривая порогов убийств (item_talent_kill_curve): подбирается по
+    // качеству И уровню предмета, заменяет единый ItemTalents.PointThresholds.
+    struct KillCurve
+    {
+        uint8 qualityMin = 0;
+        uint8 qualityMax = 7;
+        uint16 ilvlMin = 0;
+        uint16 ilvlMax = 999;
+        std::array<uint32, MAX_ROWS> segments = { };
+        int16 priority = 0;
+    };
+
     // Строка item_talent_def (acore_world)
     struct TalentDef
     {
@@ -247,6 +284,10 @@ public:
 
     void LoadConfig();      // конфиг (OnStartup; повторно - на перезагрузке конфига)
     void LoadDefinitions(); // ТОЛЬКО из WorldScript::OnStartup (БД уже доступна)
+    // Горячая перезагрузка определений из БД (.itemtalent reload): правки
+    // админ-панели видны без рестарта. Уже разданные роллы не трогаются -
+    // выбор, чей вариант исчез, чинится .itemtalent reroll.
+    void ReloadDefinitions();
 
     [[nodiscard]] bool IsEnabled() const { return _enable && _defsLoaded; }
     [[nodiscard]] uint8 GetMaxImplementedRow() const { return _maxImplementedRow; }
@@ -259,12 +300,17 @@ public:
     // (class, subclass, InvType) -> пул A..H; nullopt = предмет вне системы
     // (DESIGN §4). InvType нужен для держим-в-руке (class4/subclass0/InvType23
     // -> пул A), чтобы не спутать с кольцами/тринкетами того же subclass 0.
-    static std::optional<char> GetPool(uint32 itemClass, uint32 itemSubClass,
+    // Категория предмета по правилам item_talent_category_rule; если таблицы
+    // нет/пуста - жёсткий фолбэк GetPoolFallback (доредакторное поведение).
+    [[nodiscard]] std::optional<char> GetPool(ItemTemplate const* proto) const;
+    [[nodiscard]] std::optional<char> GetPool(uint32 itemClass, uint32 itemSubClass,
+        uint32 itemInvType = 0, uint32 quality = 0, uint32 entry = 0) const;
+    static std::optional<char> GetPoolFallback(uint32 itemClass, uint32 itemSubClass,
         uint32 itemInvType = 0);
     // качество 1..5+ -> 1..5 открытых рядов; 0 (серое) и 7 (наследие) -> 0
     static uint8 RowsOpenForQuality(uint32 quality);
     // пул есть, качество подходит, не рубашка (InvType 4) и не накидка (19)
-    static bool IsEligibleItem(ItemTemplate const* proto);
+    [[nodiscard]] bool IsEligibleItem(ItemTemplate const* proto) const;
 
     // Лукап дефа/меню: точное совпадение подкласса предмета, затем фолбэк на
     // subclass = -1 (ряды 1-4 и ряд 5 брони сидятся с -1; ряд 5 оружия -
@@ -274,6 +320,15 @@ public:
     // все choice-id меню (pool, row, subclass); nullptr = у ряда нет вариантов
     [[nodiscard]] std::vector<uint8> const* GetMenu(char pool, uint8 row,
         int16 subclass = -1) const;
+    // Меню ряда КОНКРЕТНОГО предмета: персональный пул (item_talent_item_def,
+    // эпики+/именные) сильнее меню категории. nullptr = вариантов нет.
+    [[nodiscard]] std::vector<uint8> const* GetMenuForItem(ItemTemplate const* proto,
+        uint8 row) const;
+    // Настройка ролла ряда: персональная (item_talent_item_cfg) -> категории
+    // (item_talent_row_cfg) -> дефолт (3 слота; ряд 5 - без качества)
+    [[nodiscard]] ItemTalents::RowCfg GetRowCfg(ItemTemplate const* proto, uint8 row) const;
+    // Есть ли у предмета персональный пул на этот ряд
+    [[nodiscard]] bool HasItemMenu(uint32 itemEntry, uint8 row) const;
     // значение с учётом качества ролла: базовая формула * QualityMults[quality].
     // effect='PROC': значение = max(1, ceil(per_ilvl * ilvl)), качество
     // НЕ применяется (решение PERKS "Роллы и качество"), base = spell id.
@@ -337,9 +392,11 @@ public:
     // ---- уровни пробуждения (сегменты, решение 2026-07-07) ----
     // Источник уровня - state.level (колонка item_talents.level), НЕ kills.
     // Сегмент убийств за уровень level 1..5 (0, если уровня нет в конфиге)
-    [[nodiscard]] uint32 GetLevelSegment(uint8 level) const;
+    // Сегмент берётся из кривой item_talent_kill_curve по (качество, ilvl)
+    // предмета; без подходящей строки - ItemTalents.PointThresholds из conf.
+    [[nodiscard]] uint32 GetLevelSegment(uint8 level, ItemTemplate const* proto = nullptr) const;
     // сегмент СЛЕДУЮЩЕГО уровня (нужно kills для level + 1); 0 = уровень 5
-    [[nodiscard]] uint32 NextLevelNeed(uint8 level) const;
+    [[nodiscard]] uint32 NextLevelNeed(uint8 level, ItemTemplate const* proto = nullptr) const;
     static uint32 SpentPoints(ItemTalents::ItemState const& state);
 
     // ---- опыт предмета ----
@@ -396,6 +453,9 @@ public:
     // ---- ряд 5 "Пробуждение": движок проков (ItemTalentsProcs.cpp) ----
     // Параметры проков из item_talent_procs (вызывается из LoadDefinitions)
     void LoadProcs();
+    // Таблицы админ-панели (категории/правила/персональные пулы/кривые
+    // порогов) - все опциональны, вызывается из LoadDefinitions
+    void LoadAdminTables();
     [[nodiscard]] bool ProcsLoaded() const { return _procsLoaded; }
     [[nodiscard]] ItemTalents::ProcDef const* GetProcDef(uint32 triggerSpell) const;
     // шанс прока для {chance} в desc_ru; -1 = не прок / параметров нет
@@ -528,6 +588,22 @@ private:
     std::unordered_map<uint32, uint32> _itemSounds;
     uint32 _soundCooldownMs = 30000;
     uint32 _soundOnKillChance = 5;
+
+    // ---- редактируемая из админ-панели конфигурация (V3) ----
+    // Правила категорий, отсортированы по priority (убыв.) на загрузке
+    std::vector<ItemTalents::CategoryRule> _catRules;
+    std::unordered_map<char, std::string> _catNames; // code -> имя (для логов/панели)
+    // Кэш "entry -> категория" (правила матчатся один раз на entry)
+    mutable std::unordered_map<uint32, char> _catCache;
+    // MakeKey(code,row,0,-1) -> настройка ролла ряда категории
+    std::unordered_map<uint32, ItemTalents::RowCfg> _rowCfg;
+    // (entry, row) -> персональные меню/дефы/настройка ролла предмета.
+    // Ключ 64-битный: entry доходит до миллионов (mod-worn-drops).
+    static uint64 ItemRowKey(uint32 entry, uint8 row) { return (uint64(entry) << 8) | row; }
+    std::unordered_map<uint64, std::vector<uint8>> _itemMenus;
+    std::unordered_map<uint64, ItemTalents::TalentDef> _itemDefs; // ItemRowKey << 8 | choice
+    std::unordered_map<uint64, ItemTalents::RowCfg> _itemRowCfg;
+    std::vector<ItemTalents::KillCurve> _killCurves;
 
     std::unordered_map<uint32, ItemTalents::TalentDef> _defs; // MakeKey -> def
     std::unordered_map<uint32, std::vector<uint8>> _menus;    // MakeKey(pool,row,0,sub) -> choice-id
