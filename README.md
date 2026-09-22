@@ -52,6 +52,31 @@
 - `acore_characters.item_talent_rolls` — роллы слотов: (item_guid, row,
   slot 1..3) -> (choice, quality 0..2).
 
+### V3: конфигурация из админ-панели (2026-08-19)
+
+Миграция `pending_db_world/mod_item_talents_v3_admin.sql` вынесла в БД то,
+что было зашито в C++ и в conf. Все таблицы ОПЦИОНАЛЬНЫ: без них модуль
+работает как раньше (жёсткая карта классов + `ItemTalents.PointThresholds`).
+
+- `item_talent_category` / `item_talent_category_rule` — категории вместо
+  букв A..H и правила «какой предмет в какую категорию» (замена
+  `ItemTalentsMgr::GetPool`). Матч по (class, subclass, InvType, качество,
+  диапазон entry), побеждает наибольший `priority`.
+- `item_talent_row_cfg` — по (категория, ряд): `roll_count` (сколько
+  вариантов меню выпадает в 3 слота UI) и `quality_enabled`. Меню может быть
+  до 30 вариантов: 10 вариантов и `roll_count` 3 = «3 случайных из 10».
+- `item_talent_item_def` / `item_talent_item_cfg` — ПЕРСОНАЛЬНЫЙ пул
+  конкретного предмета; перекрывает меню категории. Обобщение
+  `item_talent_named`: ровно 3 варианта = именной набор (выпадают всегда).
+- `item_talent_kill_curve` — пороги убийств по (качество, ilvl): предмет
+  ilvl 10 больше не требует столько же убийств, сколько ilvl 264.
+- `item_talent_perk_library` — заготовки перков, ядро её не читает.
+
+Правки применяются командой `.itemtalent reload` (SEC_ADMINISTRATOR,
+доступна и по SOAP) — рестарт не нужен. Уже разданные роллы она не трогает:
+предмет с выбором, которого больше нет в меню, чинится `.itemtalent reroll`.
+Редактор — `/italents.html` в tools/admin-panel.
+
 ## Патч ядра
 
 Один новый хук `OnPlayerApplyItemMods(Player*, Item*, slot, apply)` в конце

@@ -254,10 +254,28 @@ void ItemTalentsMgr::LoadConfig()
         _masterRange, _ignoreBots, _itemSounds.size());
 }
 
+void ItemTalentsMgr::ReloadDefinitions()
+{
+    // Горячая перезагрузка после правок админ-панели (.itemtalent reload).
+    // Конфиг не трогаем - только данные БД. Модуль мог быть выключен на
+    // старте отсутствующей таблицей: возвращаем флаг перед повторной
+    // загрузкой, чтобы применённая миграция подхватилась без рестарта.
+    _enable = sConfigMgr->GetOption<bool>("ItemTalents.Enable", true);
+    LoadDefinitions();
+}
+
 void ItemTalentsMgr::LoadDefinitions()
 {
     _defs.clear();
     _menus.clear();
+    _catRules.clear();
+    _catNames.clear();
+    _catCache.clear();
+    _rowCfg.clear();
+    _itemMenus.clear();
+    _itemDefs.clear();
+    _itemRowCfg.clear();
+    _killCurves.clear();
     _defsLoaded = false;
 
     if (!_enable)
@@ -398,6 +416,8 @@ void ItemTalentsMgr::LoadDefinitions()
             namedCount, _named.size());
     }
 
+    LoadAdminTables();
+
     // Ауры рядов 3 живут в spell_dbc (грузится при старте): без применённой
     // миграции mod_item_talents_aura_spells.sql проценты будут no-op.
     if (!sSpellMgr->GetSpellInfo(ItemTalents::SPELL_MOVE_SPEED_R1))
@@ -439,6 +459,165 @@ void ItemTalentsMgr::LoadDefinitions()
             ItemTalents::TRIGGER_SPELL_FIRST, ItemTalents::VISIBLE_SPELL_FIRST);
 }
 
+// ---------------------------------------------------------------------------
+// Таблицы, редактируемые из админ-панели (V3, миграция
+// pending_db_world/mod_item_talents_v3_admin.sql). Все опциональны: без них
+// модуль ведёт себя как до редактора (жёсткий GetPool + пороги из conf).
+// ---------------------------------------------------------------------------
+
+void ItemTalentsMgr::LoadAdminTables()
+{
+    // 1. Имена категорий (для логов и протокола панели)
+    if (WorldTableExists("item_talent_category"))
+        if (QueryResult cats = WorldDatabase.Query(
+            "SELECT code, name_ru FROM item_talent_category WHERE enabled = 1"))
+            do
+            {
+                Field* fields = cats->Fetch();
+                std::string const code = fields[0].Get<std::string>();
+                if (!code.empty())
+                    _catNames[code[0]] = fields[1].Get<std::string>();
+            } while (cats->NextRow());
+
+    // 2. Правила подбора категории (замена жёсткого GetPool)
+    if (!WorldTableExists("item_talent_category_rule"))
+        LOG_INFO("module", "mod-item-talents: item_talent_category_rule is missing - "
+            "using the built-in class/subclass map (apply "
+            "pending_db_world/mod_item_talents_v3_admin.sql for panel-driven categories).");
+    else if (QueryResult rules = WorldDatabase.Query(
+        "SELECT code, item_class, subclass, inv_type, quality_min, quality_max, "
+        "entry_lo, entry_hi, priority FROM item_talent_category_rule "
+        "ORDER BY priority DESC, id ASC"))
+    {
+        do
+        {
+            Field* fields = rules->Fetch();
+            std::string const code = fields[0].Get<std::string>();
+            if (code.empty())
+                continue;
+
+            // Категория, выключенная в item_talent_category, правил не даёт
+            if (!_catNames.empty() && !_catNames.contains(code[0]))
+                continue;
+
+            ItemTalents::CategoryRule rule;
+            rule.code = code[0];
+            rule.itemClass = fields[1].Get<int16>();
+            rule.subclass = fields[2].Get<int16>();
+            rule.invType = fields[3].Get<int16>();
+            rule.qualityMin = fields[4].Get<uint8>();
+            rule.qualityMax = fields[5].Get<uint8>();
+            rule.entryLo = fields[6].Get<uint32>();
+            rule.entryHi = fields[7].Get<uint32>();
+            rule.priority = fields[8].Get<int16>();
+            _catRules.push_back(rule);
+        } while (rules->NextRow());
+
+        LOG_INFO("module", "mod-item-talents: loaded {} category rules for {} categories.",
+            _catRules.size(), _catNames.size());
+    }
+
+    // 3. Настройка ролла рядов категорий
+    if (WorldTableExists("item_talent_row_cfg"))
+        if (QueryResult cfg = WorldDatabase.Query(
+            "SELECT code, `row`, roll_count, quality_enabled FROM item_talent_row_cfg"))
+            do
+            {
+                Field* fields = cfg->Fetch();
+                std::string const code = fields[0].Get<std::string>();
+                uint8 const row = fields[1].Get<uint8>();
+                if (code.empty() || row < 1 || row > MAX_ROWS)
+                    continue;
+
+                ItemTalents::RowCfg& out = _rowCfg[MakeKey(code[0], row, 0, -1)];
+                out.rollCount = std::clamp<uint8>(fields[2].Get<uint8>(), 1, MAX_SLOTS);
+                out.qualityEnabled = fields[3].Get<uint8>() != 0;
+            } while (cfg->NextRow());
+
+    // 4. Персональные пулы предметов (эпики+ / именные наборы)
+    if (WorldTableExists("item_talent_item_def"))
+    {
+        if (QueryResult defs = WorldDatabase.Query(
+            "SELECT item_entry, `row`, choice, name_ru, desc_ru, effect, base, per_ilvl "
+            "FROM item_talent_item_def"))
+        {
+            uint32 count = 0;
+            do
+            {
+                Field* fields = defs->Fetch();
+                uint32 const entry = fields[0].Get<uint32>();
+                uint8 const row = fields[1].Get<uint8>();
+                uint8 const choice = fields[2].Get<uint8>();
+                if (!entry || row < 1 || row > MAX_ROWS || choice < 1
+                    || choice > MAX_MENU_CHOICES)
+                {
+                    LOG_WARN("module", "mod-item-talents: skipped bad item_talent_item_def "
+                        "row (entry {}, row {}, choice {}).", entry, row, choice);
+                    continue;
+                }
+
+                TalentDef def;
+                def.nameRu = fields[3].Get<std::string>();
+                def.descRu = fields[4].Get<std::string>();
+                def.effect = fields[5].Get<std::string>();
+                def.base = fields[6].Get<float>();
+                def.perIlvl = fields[7].Get<float>();
+
+                uint64 const key = ItemRowKey(entry, row);
+                _itemDefs[(key << 8) | choice] = std::move(def);
+                _itemMenus[key].push_back(choice);
+                ++count;
+            } while (defs->NextRow());
+
+            LOG_INFO("module", "mod-item-talents: loaded {} per-item talent choices in {} "
+                "item rows.", count, _itemMenus.size());
+        }
+
+        if (WorldTableExists("item_talent_item_cfg"))
+            if (QueryResult cfg = WorldDatabase.Query(
+                "SELECT item_entry, `row`, roll_count, quality_enabled "
+                "FROM item_talent_item_cfg"))
+                do
+                {
+                    Field* fields = cfg->Fetch();
+                    uint32 const entry = fields[0].Get<uint32>();
+                    uint8 const row = fields[1].Get<uint8>();
+                    if (!entry || row < 1 || row > MAX_ROWS)
+                        continue;
+
+                    ItemTalents::RowCfg& out = _itemRowCfg[ItemRowKey(entry, row)];
+                    out.rollCount = std::clamp<uint8>(fields[2].Get<uint8>(), 1, MAX_SLOTS);
+                    out.qualityEnabled = fields[3].Get<uint8>() != 0;
+                } while (cfg->NextRow());
+    }
+
+    // 5. Кривая порогов убийств по (качество, ilvl)
+    if (!WorldTableExists("item_talent_kill_curve"))
+        LOG_INFO("module", "mod-item-talents: item_talent_kill_curve is missing - "
+            "using flat ItemTalents.PointThresholds from the config.");
+    else if (QueryResult curves = WorldDatabase.Query(
+        "SELECT quality_min, quality_max, ilvl_min, ilvl_max, lvl1, lvl2, lvl3, lvl4, "
+        "lvl5, priority FROM item_talent_kill_curve ORDER BY priority DESC, id ASC"))
+    {
+        do
+        {
+            Field* fields = curves->Fetch();
+            ItemTalents::KillCurve curve;
+            curve.qualityMin = fields[0].Get<uint8>();
+            curve.qualityMax = fields[1].Get<uint8>();
+            curve.ilvlMin = fields[2].Get<uint16>();
+            curve.ilvlMax = fields[3].Get<uint16>();
+            for (uint8 i = 0; i < MAX_ROWS; ++i)
+                curve.segments[i] = fields[4 + i].Get<uint32>();
+            curve.priority = fields[9].Get<int16>();
+            _killCurves.push_back(curve);
+        } while (curves->NextRow());
+
+        LOG_INFO("module", "mod-item-talents: loaded {} kill-threshold curves.",
+            _killCurves.size());
+    }
+}
+
 bool ItemTalentsMgr::ShouldIgnorePlayer(Player* player) const
 {
     if (!_ignoreBots || !player)
@@ -451,7 +630,49 @@ bool ItemTalentsMgr::ShouldIgnorePlayer(Player* player) const
 // Статика по предмету (DESIGN §4)
 // ---------------------------------------------------------------------------
 
+std::optional<char> ItemTalentsMgr::GetPool(ItemTemplate const* proto) const
+{
+    if (!proto)
+        return std::nullopt;
+
+    // Кэш по entry: правила матчатся один раз на предмет-шаблон
+    auto cached = _catCache.find(proto->ItemId);
+    if (cached != _catCache.end())
+        return cached->second ? std::optional<char>(cached->second) : std::nullopt;
+
+    std::optional<char> const pool = GetPool(proto->Class, proto->SubClass,
+        proto->InventoryType, proto->Quality, proto->ItemId);
+    _catCache[proto->ItemId] = pool ? *pool : char(0);
+    return pool;
+}
+
 std::optional<char> ItemTalentsMgr::GetPool(uint32 itemClass, uint32 itemSubClass,
+    uint32 itemInvType, uint32 quality, uint32 entry) const
+{
+    // Правила админ-панели (item_talent_category_rule); отсортированы по
+    // priority на загрузке - первое совпадение и есть ответ.
+    for (ItemTalents::CategoryRule const& rule : _catRules)
+    {
+        if (rule.itemClass >= 0 && uint32(rule.itemClass) != itemClass)
+            continue;
+        if (rule.subclass >= 0 && uint32(rule.subclass) != itemSubClass)
+            continue;
+        if (rule.invType >= 0 && uint32(rule.invType) != itemInvType)
+            continue;
+        if (quality < rule.qualityMin || quality > rule.qualityMax)
+            continue;
+        if (rule.entryHi && (entry < rule.entryLo || entry > rule.entryHi))
+            continue;
+
+        return rule.code;
+    }
+
+    // Таблицы нет/пуста - доредакторное поведение (жёсткая карта DESIGN §4)
+    return _catRules.empty() ? GetPoolFallback(itemClass, itemSubClass, itemInvType)
+                             : std::nullopt;
+}
+
+std::optional<char> ItemTalentsMgr::GetPoolFallback(uint32 itemClass, uint32 itemSubClass,
     uint32 itemInvType)
 {
     if (itemClass == ITEM_CLASS_ARMOR)
@@ -513,7 +734,7 @@ uint8 ItemTalentsMgr::RowsOpenForQuality(uint32 quality)
     }
 }
 
-bool ItemTalentsMgr::IsEligibleItem(ItemTemplate const* proto)
+bool ItemTalentsMgr::IsEligibleItem(ItemTemplate const* proto) const
 {
     if (!proto)
         return false;
@@ -524,7 +745,7 @@ bool ItemTalentsMgr::IsEligibleItem(ItemTemplate const* proto)
     if (!RowsOpenForQuality(proto->Quality))
         return false;
 
-    return GetPool(proto->Class, proto->SubClass, proto->InventoryType).has_value();
+    return GetPool(proto).has_value();
 }
 
 TalentDef const* ItemTalentsMgr::GetDef(char pool, uint8 row, uint8 choice,
@@ -596,7 +817,8 @@ uint8 ItemTalentsMgr::RowsOpenForItem(ItemTemplate const* proto) const
     uint8 const rows = RowsOpenForQuality(proto->Quality);
     // Фаза 2 (решение 2026-07-06): ряд 5 открывается УЖЕ НА ЭПИКЕ у именных
     // наборов и у базовых эпиков; GA-копии с корнем ниже эпика - потолок 4.
-    if (rows == 4 && (HasNamedSet(proto->ItemId) || IsBaseEpic(proto)))
+    if (rows == 4 && (HasNamedSet(proto->ItemId) || HasItemMenu(proto->ItemId, MAX_ROWS)
+        || IsBaseEpic(proto)))
         return MAX_ROWS;
 
     return rows;
@@ -612,7 +834,8 @@ bool ItemTalentsMgr::IsRowSelectable(ItemTemplate const* proto, uint8 row) const
 
     // Именной ряд 5 работает и без item_talent_procs (пассивы Джордана);
     // generic-проки требуют загруженных параметров.
-    return HasNamedSet(proto->ItemId) || (_procsLoaded && IsBaseEpic(proto));
+    return HasNamedSet(proto->ItemId) || HasItemMenu(proto->ItemId, MAX_ROWS)
+        || (_procsLoaded && IsBaseEpic(proto));
 }
 
 TalentDef const* ItemTalentsMgr::GetDefForItem(ItemTemplate const* proto, uint8 row,
@@ -621,12 +844,64 @@ TalentDef const* ItemTalentsMgr::GetDefForItem(ItemTemplate const* proto, uint8 
     if (!proto)
         return nullptr;
 
+    // Персональный пул предмета (item_talent_item_def) сильнее всего: если он
+    // задан на этот ряд, меню и дефы берутся ТОЛЬКО из него.
+    if (HasItemMenu(proto->ItemId, row))
+    {
+        auto itr = _itemDefs.find((ItemRowKey(proto->ItemId, row) << 8) | choice);
+        return itr != _itemDefs.end() ? &itr->second : nullptr;
+    }
+
     if (row == MAX_ROWS)
         if (ItemTalents::NamedDef const* namedDef = GetNamedDef(proto->ItemId, choice))
             return &namedDef->def;
 
-    std::optional<char> pool = GetPool(proto->Class, proto->SubClass, proto->InventoryType);
+    std::optional<char> pool = GetPool(proto);
     return pool ? GetDef(*pool, row, choice, int16(proto->SubClass)) : nullptr;
+}
+
+bool ItemTalentsMgr::HasItemMenu(uint32 itemEntry, uint8 row) const
+{
+    return _itemMenus.contains(ItemRowKey(itemEntry, row));
+}
+
+std::vector<uint8> const* ItemTalentsMgr::GetMenuForItem(ItemTemplate const* proto,
+    uint8 row) const
+{
+    if (!proto)
+        return nullptr;
+
+    auto own = _itemMenus.find(ItemRowKey(proto->ItemId, row));
+    if (own != _itemMenus.end())
+        return &own->second;
+
+    std::optional<char> pool = GetPool(proto);
+    return pool ? GetMenu(*pool, row, int16(proto->SubClass)) : nullptr;
+}
+
+ItemTalents::RowCfg ItemTalentsMgr::GetRowCfg(ItemTemplate const* proto, uint8 row) const
+{
+    // Дефолт: 3 слота UI, качество катается везде кроме ряда 5 (проки -
+    // без качества, PERKS "Роллы и качество")
+    ItemTalents::RowCfg cfg;
+    cfg.rollCount = MAX_SLOTS;
+    cfg.qualityEnabled = row != MAX_ROWS;
+
+    if (!proto)
+        return cfg;
+
+    auto own = _itemRowCfg.find(ItemRowKey(proto->ItemId, row));
+    if (own != _itemRowCfg.end())
+        return own->second;
+
+    if (std::optional<char> pool = GetPool(proto))
+    {
+        auto byCat = _rowCfg.find(MakeKey(*pool, row, 0, -1));
+        if (byCat != _rowCfg.end())
+            return byCat->second;
+    }
+
+    return cfg;
 }
 
 std::vector<uint8> const* ItemTalentsMgr::GetMenu(char pool, uint8 row, int16 subclass) const
@@ -887,8 +1162,7 @@ void ItemTalentsMgr::EnsureRolled(Player* player, Item* item)
     if (!proto)
         return;
 
-    std::optional<char> pool = GetPool(proto->Class, proto->SubClass, proto->InventoryType);
-    if (!pool)
+    if (!GetPool(proto) && !HasItemMenu(proto->ItemId, 1))
         return;
 
     std::string values;
@@ -907,9 +1181,9 @@ void ItemTalentsMgr::EnsureRolled(Player* player, Item* item)
         if (alreadyRolled)
             continue;
 
-        // Именной ряд 5: все 3 перка фиксированно (choice = слот),
-        // БЕЗ качества (quality всегда 0 - именные перки одного качества).
-        if (row == MAX_ROWS && HasNamedSet(proto->ItemId))
+        // Легаси-именной ряд 5 (item_talent_named, без персонального пула):
+        // все 3 перка фиксированно (choice = слот), БЕЗ качества.
+        if (row == MAX_ROWS && HasNamedSet(proto->ItemId) && !HasItemMenu(proto->ItemId, row))
         {
             for (uint8 slot = 1; slot <= MAX_SLOTS; ++slot)
             {
@@ -928,9 +1202,16 @@ void ItemTalentsMgr::EnsureRolled(Player* player, Item* item)
             continue;
         }
 
-        std::vector<uint8> const* menu = GetMenu(*pool, row, int16(proto->SubClass));
+        // Меню: персональный пул предмета (эпики+) -> меню категории
+        std::vector<uint8> const* menu = GetMenuForItem(proto, row);
         if (!menu || menu->empty())
             continue;
+
+        // Сколько вариантов из меню реально выпадает в 3 слота UI и катается
+        // ли качество - настройка ряда (админ-панель). Меню из 10 вариантов
+        // с rollCount 3 = "3 случайных из 10"; меню ровно из 3 = всегда эти.
+        ItemTalents::RowCfg const cfg = GetRowCfg(proto, row);
+        uint8 const rollCount = std::clamp<uint8>(cfg.rollCount, 1, MAX_SLOTS);
 
         // Миграция старых данных: rowN раньше хранил choice 1..3 - слот с тем
         // же номером закрепляет старый choice с качеством 0, применённые статы
@@ -943,7 +1224,7 @@ void ItemTalentsMgr::EnsureRolled(Player* player, Item* item)
         Acore::Containers::RandomShuffle(options);
 
         std::size_t next = 0;
-        for (uint8 slot = 1; slot <= MAX_SLOTS; ++slot)
+        for (uint8 slot = 1; slot <= rollCount; ++slot)
         {
             RollSlot& roll = state->rolls[row - 1][slot - 1];
             if (legacy && slot == legacy)
@@ -954,9 +1235,7 @@ void ItemTalentsMgr::EnsureRolled(Player* player, Item* item)
             else if (next < options.size())
             {
                 roll.choice = options[next++];
-                // Ряд 5 - проки БЕЗ качества (PERKS "Роллы и качество":
-                // роллы качеств на проки не распространяются)
-                roll.quality = row == MAX_ROWS ? 0 : RollQuality();
+                roll.quality = cfg.qualityEnabled ? RollQuality() : 0;
             }
             else
                 continue; // вариантов в меню меньше, чем слотов
@@ -1042,15 +1321,32 @@ uint8 ItemTalentsMgr::RollQuality() const
 // Уровни пробуждения (сегменты, решение 2026-07-07)
 // ---------------------------------------------------------------------------
 
-uint32 ItemTalentsMgr::GetLevelSegment(uint8 level) const
+uint32 ItemTalentsMgr::GetLevelSegment(uint8 level, ItemTemplate const* proto) const
 {
-    return (level >= 1 && level <= _levelSegments.size()) ? _levelSegments[level - 1] : 0;
+    if (level < 1 || level > MAX_ROWS)
+        return 0;
+
+    // Кривая порогов админ-панели (item_talent_kill_curve): подбирается по
+    // качеству И ilvl предмета - ilvl 10 больше не стоит столько же, сколько
+    // ilvl 264. Строки отсортированы по priority на загрузке.
+    if (proto)
+        for (ItemTalents::KillCurve const& curve : _killCurves)
+        {
+            if (proto->Quality < curve.qualityMin || proto->Quality > curve.qualityMax)
+                continue;
+            if (proto->ItemLevel < curve.ilvlMin || proto->ItemLevel > curve.ilvlMax)
+                continue;
+
+            return curve.segments[level - 1];
+        }
+
+    return level <= _levelSegments.size() ? _levelSegments[level - 1] : 0;
 }
 
-uint32 ItemTalentsMgr::NextLevelNeed(uint8 level) const
+uint32 ItemTalentsMgr::NextLevelNeed(uint8 level, ItemTemplate const* proto) const
 {
     // 0 = уровень 5 взят (или сегмент не настроен - уровень недостижим)
-    return level >= MAX_ROWS ? 0 : GetLevelSegment(level + 1);
+    return level >= MAX_ROWS ? 0 : GetLevelSegment(level + 1, proto);
 }
 
 uint32 ItemTalentsMgr::SpentPoints(ItemState const& state)
@@ -1094,7 +1390,7 @@ void ItemTalentsMgr::AddKill(Player* player)
 
         // Взятие уровня (решение 2026-07-07): счётчик обнуляется, излишки
         // сгорают. need = 0 - уровень 5 взят или сегмент не настроен.
-        uint32 const need = NextLevelNeed(state.level);
+        uint32 const need = NextLevelNeed(state.level, item->GetTemplate());
         if (!need || state.kills < need)
             continue;
 
@@ -1227,6 +1523,23 @@ void ItemTalentsMgr::ApplyTalent(Player* player, Item* item, uint8 row, uint8 sl
     if (!proto)
         return;
 
+    // Персональный пул предмета (item_talent_item_def, админ-панель) сильнее
+    // и именного набора, и меню категории.
+    if (HasItemMenu(proto->ItemId, row))
+    {
+        TalentDef const* own = GetDefForItem(proto, row, roll.choice);
+        if (!own)
+            return;
+
+        if (own->effect == "PROC")
+            ApplyProc(player, item, uint32(own->base),
+                CalcValue(*own, proto->ItemLevel, roll.quality), apply);
+        else
+            ApplyEffect(player, item, own->effect,
+                CalcValue(*own, proto->ItemLevel, roll.quality), apply);
+        return;
+    }
+
     // Именной ряд 5 - из item_talent_named (плюс прок-поля), иначе сид пула
     if (row == MAX_ROWS)
         if (ItemTalents::NamedDef const* namedDef = GetNamedDef(proto->ItemId, roll.choice))
@@ -1242,7 +1555,7 @@ void ItemTalentsMgr::ApplyTalent(Player* player, Item* item, uint8 row, uint8 sl
             return;
         }
 
-    std::optional<char> pool = GetPool(proto->Class, proto->SubClass, proto->InventoryType);
+    std::optional<char> pool = GetPool(proto);
     if (!pool)
         return;
 

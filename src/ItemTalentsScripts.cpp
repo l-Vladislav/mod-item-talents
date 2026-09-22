@@ -15,6 +15,9 @@
  *         предметы тоже 1), 0 = потолок 4 ряда ("недоступен для предмета")
  *       ITALENT:ROW:<row>:<chosen slot 0..3>
  *       ITALENT:OPT:<row>:<slot 1..3>:<effect>:<value>:<perkQuality 0..2>:<name_ru>
+ *       ITALENT:ODSC:<row>:<slot>:<описание> - desc_ru из БД с подставленными
+ *         {N}/{chance} (2026-08-19). Идёт сразу за своим OPT; аддон до v0.17
+ *         строки не знает и рисует текст из локальных шаблонов, как раньше.
  *       ITALENT:END
  *     OPT-строки - по РОЛЛАМ предмета (3 случайных варианта из меню ряда,
  *     роллятся лениво в EnsureState); value уже с множителем качества.
@@ -150,7 +153,18 @@ namespace
         return desc;
     }
 
-    // Описание перка для госсипа: ряд 5 подставляет и {chance} - у generic-
+    // Транспортная очистка строки протокола: таб - разделитель батча
+    // (ITALENT:B), перевод строки разорвал бы SysMessage на два сообщения.
+    std::string SanitizeLine(std::string text)
+    {
+        for (char& c : text)
+            if (c == '\t' || c == '\n' || c == '\r')
+                c = ' ';
+        return text;
+    }
+
+    // Описание перка для госсипа и для строки ODSC: ряд 5 подставляет
+    // и {chance} - у generic-
     // проков из item_talent_procs (base дефа = триггер-спелл), у именных
     // перков из item_talent_named.proc_chance
     std::string PerkDesc(ItemTemplate const* proto, uint8 row,
@@ -625,7 +639,7 @@ private:
         for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
         {
             Item* item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
-            if (!item || !ItemTalentsMgr::IsEligibleItem(item->GetTemplate()))
+            if (!item || !sItemTalentsMgr->IsEligibleItem(item->GetTemplate()))
                 continue;
 
             ItemTalents::ItemState& state = sItemTalentsMgr->EnsureState(player, item);
@@ -667,7 +681,7 @@ private:
         // уровня, nextNeed - сегмент следующего уровня (0 = потолок качества
         // rowsOpen или уровень 5)
         uint32 const nextNeed = state.level >= rowsOpen
-            ? 0u : sItemTalentsMgr->NextLevelNeed(state.level);
+            ? 0u : sItemTalentsMgr->NextLevelNeed(state.level, proto);
         std::string header = Acore::StringFormat("{}: уровень пробуждения {} из {}",
             proto->Name1, state.level, rowsOpen);
         if (nextNeed)
@@ -711,7 +725,7 @@ private:
                 // на каждом уровне, суммы вперёд не существует)
                 std::string text = Acore::StringFormat(
                     "Ряд {} ({}): нужен уровень пробуждения {}", row, RowName(row), row);
-                uint32 const need = sItemTalentsMgr->NextLevelNeed(state.level);
+                uint32 const need = sItemTalentsMgr->NextLevelNeed(state.level, proto);
                 if (row == state.level + 1 && need > state.kills)
                     text += Acore::StringFormat(" (осталось {} убийств)", need - state.kills);
                 AddGossipItemFor(player, GOSSIP_ICON_CHAT, text,
@@ -753,7 +767,7 @@ private:
         if (state.level < row)
         {
             std::string text = Acore::StringFormat("Нужен уровень пробуждения {}.", row);
-            uint32 const need = sItemTalentsMgr->NextLevelNeed(state.level);
+            uint32 const need = sItemTalentsMgr->NextLevelNeed(state.level, proto);
             if (row == state.level + 1 && need > state.kills)
                 text = Acore::StringFormat(
                     "Нужен уровень пробуждения {} (осталось {} убийств этим предметом).",
@@ -872,6 +886,9 @@ public:
             { "setlevel", HandleSetLevelCommand, SEC_GAMEMASTER, Console::No },
             { "reroll",   HandleRerollCommand,   SEC_GAMEMASTER, Console::No },
             { "sound",    HandleSoundCommand,    SEC_GAMEMASTER, Console::No },
+            // Горячая перезагрузка данных из БД (правки админ-панели).
+            // Console::Yes - панель зовёт её по SOAP.
+            { "reload",   HandleReloadCommand,   SEC_ADMINISTRATOR, Console::Yes },
         };
         static ChatCommandTable commandTable =
         {
@@ -891,7 +908,7 @@ private:
     static void SendItemInfo(ChatHandler* handler, Player* player, Item* item)
     {
         ItemTemplate const* proto = item->GetTemplate();
-        std::optional<char> pool = ItemTalentsMgr::GetPool(proto->Class, proto->SubClass, proto->InventoryType);
+        std::optional<char> pool = sItemTalentsMgr->GetPool(proto);
         // EnsureState лениво роллит слоты предмета (EnsureRolled внутри)
         ItemTalents::ItemState& state = sItemTalentsMgr->EnsureState(player, item);
 
@@ -903,13 +920,14 @@ private:
         // 10-е поле baseEpic: ряд 5 доступен предмету (базовый эпик или
         // именной набор - у именных тоже 1); см. шапку файла
         uint8 const baseEpic = (sItemTalentsMgr->IsBaseEpic(proto)
-            || sItemTalentsMgr->HasNamedSet(proto->ItemId)) ? 1 : 0;
+            || sItemTalentsMgr->HasNamedSet(proto->ItemId)
+            || sItemTalentsMgr->HasItemMenu(proto->ItemId, ItemTalents::MAX_ROWS)) ? 1 : 0;
 
         // kills = счётчик внутри уровня, freePts = уровень (state.level),
         // nextNeed = сегмент следующего уровня, 0 = достигнут потолок качества
         // (rowsOpen) или уровень 5; форма протокола не менялась
         uint32 const nextNeed = state.level >= rowsOpen
-            ? 0u : sItemTalentsMgr->NextLevelNeed(state.level);
+            ? 0u : sItemTalentsMgr->NextLevelNeed(state.level, proto);
         // Батчинг: те же поля/значения, только транспорт (склейка в ITALENT:B).
         // Деструктор s в конце функции добьёт остаток буфера.
         ChunkedSender s(handler);
@@ -926,12 +944,24 @@ private:
                 if (!roll.choice)
                     continue;
 
-                if (ItemTalents::TalentDef const* def =
-                    sItemTalentsMgr->GetDefForItem(proto, row, roll.choice))
-                    s.Line(Acore::StringFormat("OPT:{}:{}:{}:{}:{}:{}", row, slot,
-                        def->effect,
-                        sItemTalentsMgr->CalcValue(*def, proto->ItemLevel, roll.quality),
-                        roll.quality, def->nameRu));
+                ItemTalents::TalentDef const* def =
+                    sItemTalentsMgr->GetDefForItem(proto, row, roll.choice);
+                if (!def)
+                    continue;
+
+                int32 const value =
+                    sItemTalentsMgr->CalcValue(*def, proto->ItemLevel, roll.quality);
+                s.Line(Acore::StringFormat("OPT:{}:{}:{}:{}:{}:{}", row, slot,
+                    def->effect, value, roll.quality, def->nameRu));
+
+                // Описание перка (desc_ru из БД, с подставленными {N}/{chance})
+                // отдельной строкой: аддон до v0.12 её не знает и просто
+                // прячет как любую ITALENT:*, продолжая рисовать текст из
+                // своих локальных шаблонов. Так правка описания в админ-панели
+                // доезжает до игрока, не ломая старые клиенты.
+                std::string desc = SanitizeLine(PerkDesc(proto, row, def, roll.choice, value));
+                if (!desc.empty())
+                    s.Line(Acore::StringFormat("ODSC:{}:{}:{}", row, slot, desc));
             }
         }
 
@@ -996,7 +1026,7 @@ private:
             return true;
         }
 
-        if (!ItemTalentsMgr::IsEligibleItem(item->GetTemplate()))
+        if (!sItemTalentsMgr->IsEligibleItem(item->GetTemplate()))
         {
             SendError(handler, "NO_POOL");
             return true;
@@ -1060,10 +1090,10 @@ private:
                 continue;
 
             ItemTemplate const* proto = item->GetTemplate();
-            if (!ItemTalentsMgr::IsEligibleItem(proto))
+            if (!sItemTalentsMgr->IsEligibleItem(proto))
                 continue;
 
-            std::optional<char> pool = ItemTalentsMgr::GetPool(proto->Class, proto->SubClass, proto->InventoryType);
+            std::optional<char> pool = sItemTalentsMgr->GetPool(proto);
             ItemTalents::ItemState& state = sItemTalentsMgr->EnsureState(player, item);
             // slot+1 = клиентский inv-слот; spent нужен аддону для строки
             // "Пробуждён" в тултипе предмета; kills - счётчик внутри уровня,
@@ -1115,7 +1145,7 @@ private:
         for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
         {
             Item* item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
-            if (!item || !ItemTalentsMgr::IsEligibleItem(item->GetTemplate()))
+            if (!item || !sItemTalentsMgr->IsEligibleItem(item->GetTemplate()))
                 continue;
 
             ItemTalents::ItemState& state = sItemTalentsMgr->EnsureState(player, item);
@@ -1248,6 +1278,16 @@ private:
 
         player->PlayDirectSound(soundId, player);
         handler->PSendSysMessage("ITALENT:SOUND:{}", soundId);
+        return true;
+    }
+
+    // .itemtalent reload - перечитать item_talent_* из БД без рестарта.
+    // Уже разданные роллы предметов не трогаются: если вариант исчез из
+    // меню, у предмета останется старый выбор до .itemtalent reroll.
+    static bool HandleReloadCommand(ChatHandler* handler)
+    {
+        sItemTalentsMgr->ReloadDefinitions();
+        handler->PSendSysMessage("ITALENT:RELOAD:{}", sItemTalentsMgr->IsEnabled() ? "OK" : "OFF");
         return true;
     }
 };

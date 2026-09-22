@@ -154,6 +154,17 @@ local popupAction = nil
 local invCache = {}      -- [invSlot] = {guid, kills, level, spent} для тултипов (.itemtalent list)
 local infoCache = {}     -- [itemGuid] = разобранный info-блок (+ .at) для мгновенного ре-рендера панели
 local infoReqAt = {}     -- [itemGuid] = время последнего .itemtalent info (троттлинг волатильных kills)
+-- Липкая привязка слот -> предмет. invCache перетирается ЦЕЛИКОМ каждым list,
+-- поэтому снятая вещь теряет там guid, и вернув её обратно мы уже не находим
+-- её дерево в infoCache -> панель снова уходила на сервер ("перезагружает
+-- надетое"). slotMap живёт отдельно и только ДОПОЛНЯЕТСЯ: слот помнит
+-- последнюю известную пару guid/entry, снятие вещи её не стирает.
+local slotMap = {}       -- [invSlot] = { guid = , itemId = }
+local prefetchQ = {}     -- очередь фоновой догрузки деревьев (inv-слоты)
+local prefetchAt = 0     -- время следующего запроса из очереди
+local prefetchOk = false -- прогревать кэш только тем, кто системой пользуется
+local prefetchWait = false -- ждём ответ на фоновый запрос (гасим его ошибки)
+local MAX_TREES = 60     -- потолок персиста деревьев (LRU по .at)
 local listBuild = nil    -- накапливаемый ответ list
 local listReqAt = 0      -- троттлинг запросов list
 local listAt = nil       -- время отложенного запроса list
@@ -203,14 +214,31 @@ local function SaveCache(force)
         inv[slot] = { guid = st.guid, kills = st.kills, level = st.level, spent = st.spent }
         if st.guid then guids[st.guid] = true end
     end
-    -- Полные деревья надетых предметов тоже персистим (ключ = GUID): при
-    -- совпадении хеша на логине панель рисуется из них БЕЗ единого запроса.
-    local trees = {}
+    -- Полные деревья персистим ВСЕ, не только надетые: игрок постоянно
+    -- перекидывает вещи туда-сюда, а дерево предмета статично - выбрасывать
+    -- его на снятии значило заново тянуть с сервера при следующем надевании.
+    -- Ограничиваем размер: свежие MAX_TREES по .at, остальное отбрасываем.
+    local order = {}
     for guid, block in pairs(infoCache) do
-        if guids[guid] then trees[guid] = block end
+        if type(block) == "table" then
+            order[#order + 1] = { guid = guid, at = block.at or 0, eq = guids[guid] and 1 or 0 }
+        end
+    end
+    -- надетые - в первую очередь, дальше по свежести
+    table.sort(order, function(a, b)
+        if a.eq ~= b.eq then return a.eq > b.eq end
+        return a.at > b.at
+    end)
+    local trees = {}
+    for i = 1, math.min(#order, MAX_TREES) do
+        trees[order[i].guid] = infoCache[order[i].guid]
+    end
+    local slots = {}
+    for slot, m in pairs(slotMap) do
+        if trees[m.guid] then slots[slot] = { guid = m.guid, itemId = m.itemId } end
     end
     ItemTalentUIDB.chars = ItemTalentUIDB.chars or {}
-    ItemTalentUIDB.chars[charKey] = { hash = lastHash, inv = inv, trees = trees }
+    ItemTalentUIDB.chars[charKey] = { hash = lastHash, inv = inv, trees = trees, slots = slots }
 end
 
 local function EffectMeta(effect, name)
@@ -226,6 +254,18 @@ local function EffectDesc(effect, value, name)
         return string.format(fmt, value)
     end
     return fmt
+end
+
+-- Описание узла: сервер с 2026-08-19 шлёт его строкой ODSC (это desc_ru из
+-- item_talent_def / item_talent_item_def, правится в админ-панели). Локальные
+-- шаблоны EFFECTS/PROCS остаются фолбэком - для старого сервера и для перков,
+-- у которых desc_ru пуст. Иконки по-прежнему только локальные: их через чат
+-- не передать.
+local function OptDesc(opt)
+    if opt.desc and opt.desc ~= "" then
+        return opt.desc
+    end
+    return EffectDesc(opt.effect, opt.value, opt.name)
 end
 
 -- ---------------------------------------------------------------------------
@@ -556,7 +596,7 @@ local function NodeOnEnter(self)
     end
 
     GameTooltip:SetText(opt.name, 1.0, 0.82, 0.0)
-    GameTooltip:AddLine(EffectDesc(opt.effect, opt.value, opt.name), 1, 1, 1, 1)
+    GameTooltip:AddLine(OptDesc(opt), 1, 1, 1, 1)
     if opt.quality == 1 then
         GameTooltip:AddLine("Качество перка: отличное (+25%)", 0.12, 1.0, 0.0)
     elseif opt.quality == 2 then
@@ -668,7 +708,7 @@ local function NodeOnClick(self, button)
         local guid, r, c = current.guid, row, choice
         AskConfirm(string.format("Выбрать |cffffd100%s|r?\n%s\n\n"
             .. "Сбросить можно бесплатно у мастера оружия.",
-            opt.name, EffectDesc(opt.effect, opt.value, opt.name)), function()
+            opt.name, OptDesc(opt)), function()
             SendCmd(string.format(".itemtalent choose %d %d %d", guid, r, c))
         end)
     end
@@ -921,7 +961,7 @@ local function Render()
         local rowData = current.rows[row]
         if rowData.chosen > 0 and rowData.opts[rowData.chosen] then
             local opt = rowData.opts[rowData.chosen]
-            tinsert(parts, EffectDesc(opt.effect, opt.value, opt.name))
+            tinsert(parts, OptDesc(opt))
         end
     end
     if #parts > 0 then
@@ -939,12 +979,6 @@ end
 -- Выбор слота / обновление
 -- ---------------------------------------------------------------------------
 
-local function Refresh()
-    if selectedInv then
-        SendCmd(string.format(".itemtalent info inv %d", selectedInv))
-    end
-end
-
 -- itemId (entry) предмета в слоте из ссылки: |Hitem:12345:...|h. Нужен, чтобы
 -- отличить сменившийся предмет - guid клиенту в 3.3.5 недоступен, а entry в
 -- ссылке есть. Разные предметы = разный entry -> кэш слота устарел.
@@ -952,6 +986,45 @@ local function SlotItemId(inv)
     local link = GetInventoryItemLink("player", inv)
     if not link then return nil end
     return tonumber(link:match("|Hitem:(%d+):"))
+end
+
+-- Сколько рядов уже выбрано в кэшированном дереве (сверяется со spent из list)
+local function TreeSpent(block)
+    local n = 0
+    for r = 1, 5 do
+        if block.rows[r] and block.rows[r].chosen > 0 then n = n + 1 end
+    end
+    return n
+end
+
+-- Запомнить, какой предмет лежит в слоте. Зовётся из ответов list и info.
+local function RememberSlot(inv, guid, itemId)
+    if not inv or not guid then return end
+    slotMap[inv] = { guid = guid, itemId = itemId or SlotItemId(inv) }
+end
+
+-- GUID предмета в слоте: сперва свежий list, затем липкая привязка slotMap
+-- (она переживает снятие вещи). Привязку принимаем, только если entry в слоте
+-- совпадает с запомненным - иначе там уже другой предмет.
+local function ResolveGuid(inv, liveId)
+    local st = invCache[inv]
+    if st and st.guid then return st.guid end
+    local m = slotMap[inv]
+    if m and m.guid and (not liveId or not m.itemId or m.itemId == liveId) then
+        return m.guid
+    end
+    return nil
+end
+
+-- Дерево из кэша доказуемо свежее, если уровень и число выборов совпадают с
+-- тем, что прислал сервер в list: сами опции (роллы) меняются ТОЛЬКО вместе с
+-- уровнем (новый ряд роллится) или выбором/сбросом. Волатильны одни убийства -
+-- их list приносит сам, поэтому переспрашивать сервер незачем.
+local function TreeIsFresh(block, st)
+    if not block or not st then return false end
+    if st.level ~= block.level then return false end
+    if st.spent ~= TreeSpent(block) then return false end
+    return true
 end
 
 SelectSlot = function(inv)
@@ -966,17 +1039,23 @@ SelectSlot = function(inv)
     end
 
     -- Дерево талантов из КЭША по GUID рисуем МГНОВЕННО (оно статично, меняется
-    -- только на выбор/сброс) - без задержки и мигания. Но кэш слота (invCache)
+    -- только на выбор/сброс) - без задержки и мигания. Кэш слота (invCache)
     -- держит ПРЕЖНИЙ предмет, пока не придёт свежий list, поэтому применяем
-    -- кэш ТОЛЬКО если entry предмета в слоте совпадает с живым - иначе на миг
-    -- показался бы прогресс старого предмета (баг смены наплечников). Затем
-    -- ВСЕГДА дозапрашиваем свежий блок: kills/мастер волатильны.
+    -- дерево ТОЛЬКО если его entry совпадает с живым - иначе на миг показался
+    -- бы прогресс старого предмета (баг смены наплечников). Запрос к серверу
+    -- уходит лишь тогда, когда свежесть кэша не доказана (см. ниже).
     local liveId = SlotItemId(inv)
     local st = invCache[inv]
-    local guid = st and st.guid
+    local guid = ResolveGuid(inv, liveId)
     local cached = guid and infoCache[guid]
     if cached and cached.itemId ~= liveId then
         cached = nil -- кэш слота от прежнего предмета - не рисуем, ждём сервер
+    end
+    if st and st.guid ~= guid then
+        st = nil -- list ещё держит прежний предмет этого слота: сверять нечего
+    end
+    if cached and st then
+        cached.kills = st.kills -- убийства приносит list, дерево от этого не тухнет
     end
     if ItemTalentUIDB and ItemTalentUIDB.debug then
         Msg(string.format("слот %d: invCache=%s guid=%s дерево=%s",
@@ -989,20 +1068,19 @@ SelectSlot = function(inv)
         RenderEmpty("Загрузка...") -- чистим панель, чтобы не висел старый предмет
     end
     lastInfoAt = GetTime()
-    -- Свежие kills/мастер с сервера. Дерево статично и уже нарисовано из кэша,
-    -- волатильны только kills - поэтому запрос шлём не чаще раза в 3 сек НА
-    -- ПРЕДМЕТ (частые клики по одному слоту больше не бьют в сервер). Если
-    -- кэша по предмету нет (панель на "Загрузка...") - шлём всегда, иначе
-    -- панель зависнет. Пуш свежего info после choose/reset идёт мимо SelectSlot
-    -- (сервер сам досылает), троттлинг его не касается.
+    -- Сервер дёргаем, ТОЛЬКО если кэш недоказуем: нет дерева, либо list
+    -- показывает другой уровень/число выборов (тогда роллы могли смениться).
+    -- Раньше здесь стоял таймер на 3 сек, и любой клик по слоту спустя 3
+    -- секунды снова уезжал на сервер, хотя дерево не менялось.
     local now = GetTime()
-    if not cached or not guid or (now - (infoReqAt[guid] or 0)) >= 3 then
+    if not cached or not guid or not TreeIsFresh(cached, st) then
         if guid then infoReqAt[guid] = now end
         SendCmd(string.format(".itemtalent info inv %d", inv))
     end
 end
 
 local function ShowPanel()
+    prefetchOk = true
     f:Show()
     UpdateSlotButtons()
     -- Данные по убийствам/уровню всех надетых предметов обновляем ОДИН раз
@@ -1056,44 +1134,65 @@ local function ParseLine(msg)
         if pending then
             pending.maxRow = MAX_IMPLEMENTED_ROW
             pending.at = GetTime()
-            -- entry предмета в выбранном слоте: по нему SelectSlot отличает
-            -- сменившийся предмет и не рисует чужой кэш
-            pending.itemId = SlotItemId(selectedInv or 0)
+            -- Слот ответа: сперва по guid из свежего list/привязки (ответ мог
+            -- прийти на фоновую догрузку другого слота), иначе выбранный.
+            local ansInv = nil
+            for slot, cst in pairs(invCache) do
+                if cst.guid == pending.guid then ansInv = slot break end
+            end
+            if not ansInv then
+                for slot, m in pairs(slotMap) do
+                    if m.guid == pending.guid then ansInv = slot break end
+                end
+            end
+            ansInv = ansInv or selectedInv or 0
+            pending.itemId = SlotItemId(ansInv)
+            RememberSlot(ansInv, pending.guid, pending.itemId)
             infoCache[pending.guid] = pending -- кэш по GUID для мгновенного ре-рендера
-            -- Применяем ответ, ТОЛЬКО если он для текущего выбранного слота
-            -- (при быстром переключении медленный ответ по другому слоту не
-            -- должен затирать картинку); при холодном invCache - применяем.
-            local st = invCache[selectedInv or 0]
-            if not (st and st.guid) or st.guid == pending.guid then
+            -- Применяем ответ, ТОЛЬКО если он для текущего выбранного слота:
+            -- при быстром переключении и при фоновом прогреве соседних слотов
+            -- чужой ответ не должен затирать картинку. (При холодных
+            -- invCache/slotMap ansInv = selectedInv, т.е. поведение прежнее.)
+            -- Свежий блок несёт актуальные level/выборы - обновляем слот-кэш
+            -- ВСЕГДА (в т.ч. для фоново прогретого соседнего слота): иначе
+            -- level/spent в invCache разойдутся с деревом и TreeIsFresh будет
+            -- гонять запрос за запросом.
+            if ansInv and ansInv > 0 then
+                invCache[ansInv] = { guid = pending.guid, kills = pending.kills,
+                    level = pending.level, spent = TreeSpent(pending) }
+            end
+            if selectedInv and ansInv == selectedInv then
                 current = pending
                 lastInfoAt = GetTime()
                 Render()
-                -- Свежий блок несёт актуальные level/выборы - обновим слот-кэш
-                -- (spent = число выбранных рядов) и сияние доступных очков
-                -- после выбора/сброса, не дожидаясь полного list.
-                if selectedInv then
-                    local spent = 0
-                    for r = 1, 5 do
-                        if pending.rows[r] and pending.rows[r].chosen > 0 then
-                            spent = spent + 1
-                        end
-                    end
-                    invCache[selectedInv] = { guid = pending.guid, kills = pending.kills,
-                        level = pending.level, spent = spent }
-                    UpdateSlotButtons()
-                end
             end
+            if f:IsShown() then UpdateSlotButtons() end
             pending = nil
+            prefetchWait = false
             SaveCache() -- персистим выученное дерево сразу (no-op пока нет lastHash)
         elseif listBuild then
             invCache = listBuild
             listBuild = nil
-            -- Полный list в ответ на sync = хеш РАЗОШЁЛСЯ: персистнутые деревья
-            -- могли устареть, сбрасываем (обычные list-обновления не трогают
-            -- infoCache - там ключ по GUID сам отсекает сменившиеся предметы).
-            if syncPending then
-                infoCache = {}
-                syncPending = false
+            syncPending = false
+            -- Раньше полный list в ответ на sync (хеш разошёлся) сносил ВСЕ
+            -- деревья - а хеш расходится от любого убийства, поднявшего уровень
+            -- предмета, и от любой смены шмотки. Итог: кэш почти никогда не
+            -- переживал сессию и панель каждый раз тянула всё заново.
+            -- Теперь сверяем поштучно: дерево живёт, пока уровень и число
+            -- выборов совпадают с серверными; тухнет - только оно одно.
+            wipe(prefetchQ)
+            for slot, cst in pairs(invCache) do
+                RememberSlot(slot, cst.guid)
+                local block = infoCache[cst.guid]
+                if block and not TreeIsFresh(block, cst) then
+                    infoCache[cst.guid] = nil
+                    block = nil
+                end
+                if block then
+                    block.kills = cst.kills
+                else
+                    prefetchQ[#prefetchQ + 1] = slot -- догрузим в фоне
+                end
             end
             SaveCache()
             -- Свежие level/spent пришли - пересчитать сияние доступных очков
@@ -1117,6 +1216,19 @@ local function ParseLine(msg)
             local st = invCache[tonumber(slot)]
             if st then st.kills = tonumber(kills) end
         end
+        -- Деревья, которых в персисте не оказалось (предмет ни разу не
+        -- открывали), догружаем в фоне - чтобы первый же клик был мгновенным.
+        wipe(prefetchQ)
+        for slot, cst in pairs(invCache) do
+            RememberSlot(slot, cst.guid)
+            local block = infoCache[cst.guid]
+            if block and TreeIsFresh(block, cst) then
+                block.kills = cst.kills
+            else
+                infoCache[cst.guid] = nil
+                prefetchQ[#prefetchQ + 1] = slot
+            end
+        end
         SaveCache()
         return true
     end
@@ -1130,6 +1242,12 @@ local function ParseLine(msg)
 
     local err = msg:match("^ITALENT:ERR:(%w+)$")
     if err then
+        -- Ошибка фонового прогрева (вещь сняли/она вне системы) - не наш
+        -- запрос с точки зрения игрока: гасим, не трогая подсказку панели.
+        if prefetchWait and (err == "NO_ITEM" or err == "NO_POOL") then
+            prefetchWait = false
+            return true
+        end
         local text = ERR_TEXT[err] or ("Ошибка: " .. err)
         if f:IsShown() then hint:SetText(text) else Msg(text) end
         if err == "NO_POOL" and f:IsShown() then
@@ -1178,6 +1296,17 @@ local function ParseLine(msg)
             }
             return true
         end
+
+        -- ODSC:<row>:<slot>:<описание> - серверный текст перка (desc_ru).
+        -- Приходит сразу за своим OPT; если сервер старый, строки просто нет.
+        local dRow, dSlot, desc = msg:match("^ITALENT:ODSC:(%d+):(%d+):(.+)$")
+        if dRow then
+            local opts = pending.rows[tonumber(dRow)].opts
+            local slot = tonumber(dSlot)
+            opts[slot] = opts[slot] or {}
+            opts[slot].desc = desc
+            return true
+        end
     end
 
     -- ITEM-строки ответа list: состояния надетых предметов для тултипов.
@@ -1212,13 +1341,31 @@ end)
 -- Отложенные запросы list / верификация локального кэша
 local updater = CreateFrame("Frame")
 updater:SetScript("OnUpdate", function()
-    if listAt and GetTime() >= listAt then
+    local now = GetTime()
+    if listAt and now >= listAt then
         listAt = nil
         RequestList()
     end
-    if syncAt and GetTime() >= syncAt then
+    if syncAt and now >= syncAt then
         syncAt = nil
         SendCmd(".itemtalent sync " .. lastHash)
+    end
+    -- Фоновый прогрев: деревья слотов, которых нет в кэше, тянем сами по
+    -- одному раз в 0.4 сек. К моменту, когда игрок доберётся до слота, оно
+    -- уже лежит в infoCache и панель рисуется мгновенно, без "Загрузка...".
+    if prefetchOk and #prefetchQ > 0 and now >= prefetchAt then
+        prefetchAt = now + 0.4
+        local inv = table.remove(prefetchQ, 1)
+        local cst = invCache[inv]
+        local block = cst and infoCache[cst.guid]
+        -- Слот мог опустеть с момента list - молча пропускаем, иначе фон
+        -- насыпал бы в чат "Предмет не найден".
+        if cst and GetInventoryItemLink("player", inv)
+            and not (block and TreeIsFresh(block, cst)) then
+            infoReqAt[cst.guid] = now
+            prefetchWait = true
+            SendCmd(string.format(".itemtalent info inv %d", inv))
+        end
     end
 end)
 
@@ -1335,6 +1482,11 @@ ev:SetScript("OnEvent", function(self, event, arg1)
                     level = st.level, spent = st.spent }
             end
             infoCache = saved.trees or {}
+            prefetchOk = next(infoCache) ~= nil -- панелью уже пользовались
+            slotMap = {}
+            for slot, m in pairs(saved.slots or {}) do
+                slotMap[slot] = { guid = m.guid, itemId = m.itemId }
+            end
             lastHash = saved.hash
             syncPending = true
             syncAt = GetTime() + 8
@@ -1351,7 +1503,11 @@ ev:SetScript("OnEvent", function(self, event, arg1)
             if now - invChangedAt > 1 then
                 invChangedAt = now
                 if selectedInv and GetInventoryItemLink("player", selectedInv) then
-                    Refresh()
+                    -- Через SelectSlot, а не Refresh: если в слоте та же вещь
+                    -- (снял/надел, трансмог, починка) - рисуем из кэша и НЕ
+                    -- дёргаем сервер. Раньше тут был безусловный info-запрос,
+                    -- отчего переодевание уже надетого выглядело перезагрузкой.
+                    SelectSlot(selectedInv)
                 end
             end
         end
